@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Uncensored Harness</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #1a1a1e; --panel: #222228; --panel2: #26262d; --border: #33333c;
+    --text: #e8e8ea; --dim: #9a9aa5; --accent: #d97757; --accent2: #c15f3c;
+    --green: #4caf7d; --code: #141417;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+         background: var(--bg); color: var(--text); height: 100vh; display: flex; }
+  /* sidebar */
+  #sidebar { width: 260px; background: var(--panel); border-right: 1px solid var(--border);
+             display: flex; flex-direction: column; flex-shrink: 0; }
+  #sidebar h2 { font-size: 13px; color: var(--dim); padding: 14px 16px 8px;
+                text-transform: uppercase; letter-spacing: .06em; }
+  #newchat { margin: 0 12px 8px; padding: 10px; background: var(--accent); color: #fff;
+             border: 0; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  #newchat:hover { background: var(--accent2); }
+  #threads { flex: 1; overflow-y: auto; padding: 0 8px; }
+  .thread { padding: 10px 12px; border-radius: 8px; cursor: pointer; font-size: 14px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+  .thread:hover { background: var(--panel2); color: var(--text); }
+  .thread.active { background: var(--panel2); color: var(--text); }
+  #sidefoot { padding: 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--dim); }
+  #selftest-btn { width: 100%; margin-top: 8px; padding: 8px; background: var(--panel2);
+                  color: var(--text); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+  #selftest-btn:hover { border-color: var(--accent); }
+  /* main */
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #topbar { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex;
+            align-items: center; gap: 12px; }
+  #topbar h1 { font-size: 16px; font-weight: 600; }
+  #model-badge { font-size: 12px; background: var(--panel2); border: 1px solid var(--border);
+                 padding: 4px 10px; border-radius: 20px; color: var(--dim); }
+  #model-badge b { color: var(--green); font-weight: 600; }
+  #topbar .spacer { flex: 1; }
+  .tabbtn { background: var(--panel2); color: var(--dim); border: 1px solid var(--border);
+             padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .tabbtn.active { color: var(--text); border-color: var(--accent); }
+  /* chat */
+  #chat { flex: 1; overflow-y: auto; padding: 20px; display: none; flex-direction: column; gap: 18px; }
+  #chat.visible { display: flex; }
+  .msg { max-width: 860px; width: 100%; margin: 0 auto; }
+  .msg.user .bubble { background: var(--panel2); border: 1px solid var(--border);
+                      border-radius: 12px; padding: 12px 16px; width: fit-content;
+                      max-width: 100%; margin-left: auto; white-space: pre-wrap; }
+  .msg.assistant .bubble { padding: 4px 0; }
+  .bubble h1, .bubble h2, .bubble h3 { margin: 12px 0 6px; }
+  .bubble p { margin: 8px 0; line-height: 1.55; }
+  .bubble ul, .bubble ol { margin: 8px 0 8px 22px; line-height: 1.55; }
+  .bubble a { color: var(--accent); }
+  .bubble code { background: var(--code); padding: 2px 6px; border-radius: 5px;
+                 font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+  .codeblock { position: relative; background: var(--code); border: 1px solid var(--border);
+               border-radius: 10px; margin: 10px 0; overflow: hidden; }
+  .codeblock .chead { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+                      border-bottom: 1px solid var(--border); font-size: 12px; color: var(--dim); }
+  .codeblock .chead .spacer { flex: 1; }
+  .cbtn { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+          padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .cbtn:hover { border-color: var(--accent); }
+  .codeblock pre { padding: 12px 14px; overflow-x: auto; }
+  .codeblock pre code { background: none; padding: 0; }
+  .runout { border-top: 1px solid var(--border); padding: 10px 14px; font-family: monospace;
+            font-size: 13px; white-space: pre-wrap; max-height: 300px; overflow-y: auto;
+            background: #101013; }
+  .thinking { display: flex; align-items: center; gap: 8px; color: var(--dim);
+              font-size: 14px; padding: 6px 0; }
+  .tdots span { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+                background: var(--dim); margin-right: 4px; animation: blink 1.2s infinite; }
+  .tdots span:nth-child(2) { animation-delay: .2s; } .tdots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+  .toolcall { border: 1px solid var(--border); border-radius: 10px; margin: 8px 0;
+              background: var(--panel); font-size: 13px; }
+  .toolcall summary { padding: 10px 14px; cursor: pointer; color: var(--dim); }
+  .toolcall summary b { color: var(--text); font-family: monospace; font-weight: 600; }
+  .toolcall .tbody { padding: 0 14px 12px; font-family: monospace; white-space: pre-wrap;
+                     color: var(--dim); max-height: 260px; overflow-y: auto; }
+  .shot { margin: 10px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .shot img { width: 100%; display: block; }
+  .shot .cap { padding: 8px 12px; font-size: 12px; color: var(--dim); background: var(--panel); }
+  .err { color: #e57373; padding: 8px 0; font-size: 14px; }
+  /* composer */
+  #composer { border-top: 1px solid var(--border); padding: 14px 20px; display: none; }
+  #composer.visible { display: block; }
+  #inputrow { max-width: 860px; margin: 0 auto; display: flex; gap: 10px; }
+  #msg { flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+         border-radius: 12px; padding: 12px 16px; font-size: 15px; resize: none; height: 52px;
+         font-family: inherit; }
+  #msg:focus { outline: none; border-color: var(--accent); }
+  #send { background: var(--accent); color: #fff; border: 0; border-radius: 12px;
+          padding: 0 22px; font-size: 15px; cursor: pointer; }
+  #send:hover { background: var(--accent2); } #send:disabled { opacity: .5; }
+  /* terminal panel */
+  #terminal { flex: 1; display: none; flex-direction: column; padding: 20px; gap: 10px;
+              max-width: 960px; width: 100%; margin: 0 auto; }
+  #terminal.visible { display: flex; }
+  #termout { flex: 1; background: #101013; border: 1px solid var(--border); border-radius: 10px;
+             padding: 14px; font-family: ui-monospace, Menlo, monospace; font-size: 13px;
+             overflow-y: auto; white-space: pre-wrap; }
+  #termin { display: flex; gap: 10px; }
+  #termcmd { flex: 1; background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+             border-radius: 8px; padding: 10px 14px; font-family: monospace; font-size: 14px; }
+  /* preview modal */
+  #pmodal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
+            z-index: 50; padding: 40px; }
+  #pmodal.visible { display: block; }
+  #pbox { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+          height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  #pbar { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex;
+          gap: 10px; align-items: center; }
+  #pframe { flex: 1; border: 0; background: #fff; }
+  #stmodal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
+             z-index: 50; padding: 60px 20px; }
+  #stmodal.visible { display: block; }
+  #stbox { max-width: 640px; margin: 0 auto; background: var(--panel); border: 1px solid var(--border);
+           border-radius: 12px; padding: 24px; }
+  #stbox h3 { margin-bottom: 12px; } .probe { padding: 10px 0; border-top: 1px solid var(--border); font-size: 14px; }
+  .pass { color: var(--green); } .fail { color: #e57373; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h2>Chats</h2>
+  <button id="newchat">+ New chat</button>
+  <div id="threads"></div>
+  <div id="sidefoot">
+    <div id="verdict">model check: not run</div>
+    <button id="selftest-btn">Run uncensored self-test</button>
+  </div>
+</div>
+<div id="main">
+  <div id="topbar">
+    <h1>Uncensored Harness</h1>
+    <span id="model-badge">route: <b>pollinations</b> → horde fallback</span>
+    <div class="spacer"></div>
+    <button class="tabbtn active" id="tab-chat">Chat</button>
+    <button class="tabbtn" id="tab-term">Terminal</button>
+  </div>
+  <div id="chat" class="visible"></div>
+  <div id="terminal">
+    <div id="termout">$ terminal ready — commands run in the harness workdir\n</div>
+    <div id="termin">
+      <input id="termcmd" placeholder="type a command…" autocomplete="off">
+      <button id="termgo" class="cbtn" style="padding:10px 18px">Run</button>
+    </div>
+  </div>
+  <div id="composer" class="visible">
+    <div id="inputrow">
+      <textarea id="msg" placeholder="Ask anything…"></textarea>
+      <button id="send">Send</button>
+    </div>
+  </div>
+</div>
+<div id="pmodal"><div id="pbox">
+  <div id="pbar"><b id="ptitle">Preview</b><div class="spacer" style="flex:1"></div>
+    <button class="cbtn" id="pclose">Close</button></div>
+  <iframe id="pframe"></iframe>
+</div></div>
+<div id="stmodal"><div id="stbox">
+  <h3>Uncensored self-test</h3><div id="stbody">running…</div>
+  <div style="margin-top:16px;text-align:right"><button class="cbtn" id="stclose">Close</button></div>
+</div></div>
+
+<script>
+const AC = ""; // set HARNESS_ACCESS_CODE server-side; appended if needed
+let threadId = "", sending = false;
+
+marked.setOptions({ breaks: true });
+const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+function renderMarkdown(src) {
+  const html = marked.parse(src || "");
+  return DOMPurify.sanitize(html);
+}
+
+// post-process code blocks: highlight + copy/run/preview buttons
+function decorateCodeBlocks(root) {
+  root.querySelectorAll("pre code").forEach(code => {
+    hljs.highlightElement(code);
+    const pre = code.parentElement;
+    if (pre.parentElement.classList.contains("codeblock")) return;
+    const lang = (code.className.match(/language-(\w+)/) || [,"text"])[1];
+    const wrap = document.createElement("div");
+    wrap.className = "codeblock";
+    const head = document.createElement("div");
+    head.className = "chead";
+    head.innerHTML = `<span>${esc(lang)}</span><div class="spacer"></div>`;
+    const copy = document.createElement("button");
+    copy.className = "cbtn"; copy.textContent = "Copy";
+    copy.onclick = () => { navigator.clipboard.writeText(code.innerText); copy.textContent = "Copied!"; setTimeout(()=>copy.textContent="Copy",1500); };
+    head.appendChild(copy);
+    if (["python","js","javascript"].includes(lang)) {
+      const run = document.createElement("button");
+      run.className = "cbtn"; run.textContent = "▶ Run";
+      run.onclick = () => runCode(lang, code.innerText, wrap);
+      head.appendChild(run);
+    }
+    pre.replaceWith(wrap);
+    wrap.appendChild(head); wrap.appendChild(pre);
+    if (wrap.dataset.htmlsrc) { /* set by app-maker path */ }
+  });
+  // preview buttons for html code blocks get added by agent text markers
+}
+
+async function runCode(lang, code, wrap) {
+  let out = wrap.querySelector(".runout");
+  if (!out) { out = document.createElement("div"); out.className = "runout"; wrap.appendChild(out); }
+  out.textContent = "running…";
+  try {
+    const r = await fetch("/api/run", { method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ language: lang, code, access_code: AC }) });
+    const d = await r.json();
+    out.textContent = d.output || ("exit " + d.exit);
+  } catch(e) { out.textContent = "run failed: " + e; }
+}
+
+function openPreview(path) {
+  document.getElementById("ptitle").textContent = "Preview: " + path;
+  document.getElementById("pframe").src = "/api/preview?path=" + encodeURIComponent(path) + "&access_code=" + encodeURIComponent(AC);
+  document.getElementById("pmodal").classList.add("visible");
+}
+document.getElementById("pclose").onclick = () =>
+  { document.getElementById("pmodal").classList.remove("visible");
+    document.getElementById("pframe").src = "about:blank"; };
+
+// detect "Preview: path/to.html" markers in agent text → preview button
+function addPreviewButtons(root) {
+  root.querySelectorAll("p, li").forEach(el => {
+    const m = el.textContent.match(/Preview:\s*([\w\-./]+\.html?)/i);
+    if (m && !el.dataset.pv) {
+      el.dataset.pv = "1";
+      const b = document.createElement("button");
+      b.className = "cbtn"; b.style.marginLeft = "8px"; b.textContent = "Open live preview";
+      b.onclick = () => openPreview(m[1]);
+      el.appendChild(b);
+    }
+  });
+}
+
+const chat = document.getElementById("chat");
+
+function addUser(text) {
+  const d = document.createElement("div");
+  d.className = "msg user";
+  d.innerHTML = `<div class="bubble">${esc(text)}</div>`;
+  chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+
+function newAssistant() {
+  const d = document.createElement("div");
+  d.className = "msg assistant";
+  d.innerHTML = `<div class="bubble"></div>`;
+  chat.appendChild(d);
+  return d.querySelector(".bubble");
+}
+
+function setThinking(bubble, text) {
+  let t = bubble.querySelector(".thinking");
+  if (!t) { t = document.createElement("div"); t.className = "thinking"; bubble.appendChild(t); }
+  t.innerHTML = `<div class="tdots"><span></span><span></span><span></span></div><span>${esc(text||"Thinking…")}</span>`;
+  chat.scrollTop = chat.scrollHeight;
+}
+function clearThinking(bubble) { bubble.querySelectorAll(".thinking").forEach(e => e.remove()); }
+
+function appendText(bubble, text) {
+  clearThinking(bubble);
+  let body = bubble.querySelector(".mbody");
+  if (!body) { body = document.createElement("div"); body.className = "mbody"; bubble.appendChild(body); }
+  body._src = (body._src || "") + text;
+  body.innerHTML = renderMarkdown(body._src);
+  decorateCodeBlocks(body); addPreviewButtons(body);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function appendTool(bubble, name, args) {
+  clearThinking(bubble);
+  const d = document.createElement("details");
+  d.className = "toolcall";
+  d.innerHTML = `<summary>🔧 <b>${esc(name)}</b></summary><div class="tbody">${esc(JSON.stringify(args,null,1)).slice(0,1500)}</div>`;
+  bubble.appendChild(d); chat.scrollTop = chat.scrollHeight;
+  return d;
+}
+function appendToolResult(bubble, name, output) {
+  const blocks = bubble.querySelectorAll(".toolcall");
+  const last = blocks[blocks.length-1];
+  if (last) {
+    const t = document.createElement("div");
+    t.className = "tbody"; t.style.borderTop = "1px solid var(--border)";
+    t.style.paddingTop = "8px"; t.textContent = String(output).slice(0,3000);
+    last.appendChild(t);
+  }
+  chat.scrollTop = chat.scrollHeight;
+}
+function appendShot(bubble, shot, caption) {
+  clearThinking(bubble);
+  const d = document.createElement("div");
+  d.className = "shot";
+  d.innerHTML = `<img src="/api/shot/${encodeURIComponent(shot)}" alt="screenshot"><div class="cap">${esc(caption||"screenshot")}</div>`;
+  bubble.appendChild(d); chat.scrollTop = chat.scrollHeight;
+}
+
+async function send() {
+  const input = document.getElementById("msg");
+  const text = input.value.trim();
+  if (!text || sending) return;
+  sending = true; document.getElementById("send").disabled = true;
+  input.value = "";
+  addUser(text);
+  const bubble = newAssistant();
+  setThinking(bubble, "Thinking…");
+  try {
+    const r = await fetch("/api/chat", { method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ message: text, thread_id: threadId, access_code: AC }) });
+    if (!r.ok) { clearThinking(bubble); bubble.innerHTML += `<div class="err">HTTP ${r.status}</div>`; return; }
+    const reader = r.body.getReader();
+    const dec = new TextDecoder(); let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n\n"); buf = parts.pop();
+      for (const p of parts) {
+        const line = p.trim(); if (!line.startsWith("data:")) continue;
+        const ev = JSON.parse(line.slice(5));
+        if (ev.type === "thread") threadId = ev.thread_id;
+        else if (ev.type === "thinking") setThinking(bubble, ev.text);
+        else if (ev.type === "text") appendText(bubble, ev.text);
+        else if (ev.type === "tool") appendTool(bubble, ev.name, ev.args);
+        else if (ev.type === "tool_result") appendToolResult(bubble, ev.name, ev.output);
+        else if (ev.type === "shot") appendShot(bubble, ev.shot, ev.caption);
+        else if (ev.type === "error") { clearThinking(bubble); bubble.innerHTML += `<div class="err">${esc(ev.error)}</div>`; }
+        else if (ev.type === "done") { clearThinking(bubble);
+          document.getElementById("model-badge").innerHTML = `route: <b>${esc(ev.model||"?")}</b> → horde fallback`; }
+      }
+    }
+  } catch(e) { clearThinking(bubble); bubble.innerHTML += `<div class="err">failed: ${esc(String(e))}</div>`; }
+  sending = false; document.getElementById("send").disabled = false;
+  loadThreads();
+}
+
+document.getElementById("send").onclick = send;
+document.getElementById("msg").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+document.getElementById("newchat").onclick = () => { threadId = ""; chat.innerHTML = ""; };
+
+// tabs
+const tabChat = document.getElementById("tab-chat"), tabTerm = document.getElementById("tab-term");
+tabChat.onclick = () => { tabChat.classList.add("active"); tabTerm.classList.remove("active");
+  document.getElementById("chat").classList.add("visible"); document.getElementById("terminal").classList.remove("visible");
+  document.getElementById("composer").classList.add("visible"); };
+tabTerm.onclick = () => { tabTerm.classList.add("active"); tabChat.classList.remove("active");
+  document.getElementById("terminal").classList.add("visible"); document.getElementById("chat").classList.remove("visible");
+  document.getElementById("composer").classList.remove("visible"); };
+
+// terminal
+const termout = document.getElementById("termout"), termcmd = document.getElementById("termcmd");
+async function termRun() {
+  const cmd = termcmd.value.trim(); if (!cmd) return; termcmd.value = "";
+  termout.textContent += "\n$ " + cmd + "\n"; termout.scrollTop = termout.scrollHeight;
+  try {
+    const r = await fetch("/api/shell", { method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ command: cmd, access_code: AC }) });
+    const d = await r.json();
+    termout.textContent += (d.output || "") + "\n";
+  } catch(e) { termout.textContent += "error: " + e + "\n"; }
+  termout.scrollTop = termout.scrollHeight;
+}
+document.getElementById("termgo").onclick = termRun;
+termcmd.addEventListener("keydown", e => { if (e.key === "Enter") termRun(); });
+
+// threads
+async function loadThreads() {
+  try {
+    const r = await fetch("/api/threads?access_code=" + encodeURIComponent(AC));
+    const d = await r.json();
+    const box = document.getElementById("threads"); box.innerHTML = "";
+    (d.threads || []).forEach(t => {
+      const el = document.createElement("div");
+      el.className = "thread" + (t.id === threadId ? " active" : "");
+      el.textContent = t.title || "untitled";
+      el.onclick = () => { threadId = t.id; chat.innerHTML = ""; loadThreads(); };
+      box.appendChild(el);
+    });
+  } catch(e) {}
+}
+
+// self-test
+document.getElementById("selftest-btn").onclick = async () => {
+  document.getElementById("stmodal").classList.add("visible");
+  document.getElementById("stbody").innerHTML = "running probes…";
+  try {
+    const r = await fetch("/api/self-test?access_code=" + encodeURIComponent(AC));
+    const d = await r.json();
+    let h = `<p><b class="${d.ok ? "pass" : "fail"}">${esc(d.verdict)}</b> (${d.passed}/${d.total})</p>`;
+    (d.probes || []).forEach(p => {
+      h += `<div class="probe"><span class="${p.passed ? "pass" : "fail"}">${p.passed ? "PASS" : "FAIL"}</span>
+            <b>${esc(p.label)}</b> <span style="color:var(--dim)">[${esc(p.source || "?")}]</span><br>
+            <span style="color:var(--dim)">${esc(p.detail || "")}</span></div>`;
+    });
+    document.getElementById("stbody").innerHTML = h;
+    document.getElementById("verdict").textContent = "model check: " + d.verdict;
+  } catch(e) { document.getElementById("stbody").textContent = "self-test failed: " + e; }
+};
+document.getElementById("stclose").onclick = () =>
+  document.getElementById("stmodal").classList.remove("visible");
+
+loadThreads();
+</script>
+</body>
+</html>

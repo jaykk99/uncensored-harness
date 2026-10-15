@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: uncensored-harness
+    runtime: python
+    buildCommand: "pip install -r requirements.txt && python -m playwright install chromium"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: HARNESS_WORKDIR
+        value: /opt/render/project/src/work

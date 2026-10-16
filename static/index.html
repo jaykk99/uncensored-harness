@@ -133,6 +133,23 @@
            border-radius: 12px; padding: 24px; }
   #stbox h3 { margin-bottom: 12px; } .probe { padding: 10px 0; border-top: 1px solid var(--border); font-size: 14px; }
   .pass { color: var(--green); } .fail { color: #e57373; }
+  /* access gate */
+  #gate { position: fixed; inset: 0; background: var(--bg); z-index: 100;
+          display: flex; align-items: center; justify-content: center; padding: 20px; }
+  #gate.hidden { display: none; }
+  #gatebox { width: 100%; max-width: 360px; background: var(--panel);
+             border: 1px solid var(--border); border-radius: 14px; padding: 28px 24px;
+             text-align: center; }
+  #gatebox h2 { font-size: 18px; margin-bottom: 8px; }
+  #gatebox p { font-size: 13px; color: var(--dim); margin-bottom: 18px; line-height: 1.5; }
+  #gatecode { width: 100%; background: var(--panel2); border: 1px solid var(--border);
+              color: var(--text); border-radius: 10px; padding: 12px 14px; font-size: 15px;
+              font-family: monospace; margin-bottom: 12px; text-align: center; }
+  #gatecode:focus { outline: none; border-color: var(--accent); }
+  #gatego { width: 100%; background: var(--accent); color: #fff; border: 0;
+            border-radius: 10px; padding: 12px; font-size: 15px; cursor: pointer; }
+  #gatego:hover { background: var(--accent2); }
+  #gateerr { color: #e57373; font-size: 13px; margin-top: 10px; min-height: 18px; }
   /* mobile */
   @media (max-width: 768px) {
     #menu-btn { display: block; }
@@ -161,6 +178,15 @@
 </style>
 </head>
 <body>
+<div id="gate">
+  <div id="gatebox">
+    <h2>Uncensored Harness</h2>
+    <p>Enter your access code to continue.</p>
+    <input id="gatecode" type="password" placeholder="access code" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="gatego">Unlock</button>
+    <div id="gateerr"></div>
+  </div>
+</div>
 <div id="scrim"></div>
 <div id="sidebar">
   <h2>Chats</h2>
@@ -206,8 +232,31 @@
 </div></div>
 
 <script>
-const AC = ""; // set HARNESS_ACCESS_CODE server-side; appended if needed
+let AC = localStorage.getItem("harness_ac") || "";
 let threadId = "", sending = false;
+
+// access gate
+const gate = document.getElementById("gate"), gatecode = document.getElementById("gatecode"),
+      gateerr = document.getElementById("gateerr");
+async function tryUnlock(code) {
+  gateerr.textContent = "";
+  try {
+    const r = await fetch("/api/threads?access_code=" + encodeURIComponent(code));
+    if (r.ok) {
+      AC = code;
+      localStorage.setItem("harness_ac", code);
+      gate.classList.add("hidden");
+      loadThreads();
+      return true;
+    }
+    gateerr.textContent = r.status === 401 ? "Wrong code, try again." : "Server error " + r.status;
+  } catch(e) { gateerr.textContent = "Could not reach server."; }
+  return false;
+}
+document.getElementById("gatego").onclick = () => tryUnlock(gatecode.value.trim());
+gatecode.addEventListener("keydown", e => { if (e.key === "Enter") tryUnlock(gatecode.value.trim()); });
+function logout() { AC = ""; localStorage.removeItem("harness_ac"); gate.classList.remove("hidden"); gatecode.value = ""; gatecode.focus(); }
+if (AC) { tryUnlock(AC); } else { gatecode.focus(); }
 
 marked.setOptions({ breaks: true });
 const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -459,8 +508,6 @@ document.getElementById("selftest-btn").onclick = async () => {
 };
 document.getElementById("stclose").onclick = () =>
   document.getElementById("stmodal").classList.remove("visible");
-
-loadThreads();
 </script>
 </body>
 </html>

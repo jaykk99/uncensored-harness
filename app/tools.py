@@ -26,8 +26,16 @@ COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
 
 
 def _proxy() -> str | None:
-    return (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-            or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or None)
+    p = (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+         or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or None)
+    if p:
+        try:
+            from urllib.parse import urlparse
+            if (urlparse(p).hostname or "") in ("localhost", "127.0.0.1", "::1"):
+                return None
+        except Exception:
+            return None
+    return p
 
 
 def _verify():

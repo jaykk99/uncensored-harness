@@ -85,8 +85,18 @@ def looks_like_refusal(text: str) -> bool:
 
 
 def _proxy() -> str | None:
-    return (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-            or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or None)
+    p = (os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+         or os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy") or None)
+    # Ignore loopback proxies: SnapDeploy required the env var but runs no proxy
+    # on localhost, which would blackhole all outbound API calls.
+    if p:
+        try:
+            from urllib.parse import urlparse
+            if (urlparse(p).hostname or "") in ("localhost", "127.0.0.1", "::1"):
+                return None
+        except Exception:
+            return None
+    return p
 
 
 def _verify():

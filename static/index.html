@@ -15,11 +15,14 @@
     --green: #4caf7d; --code: #141417;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
   body { font-family: -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
-         background: var(--bg); color: var(--text); height: 100vh; display: flex; }
+         background: var(--bg); color: var(--text); height: 100dvh; display: flex;
+         overflow: hidden; }
   /* sidebar */
   #sidebar { width: 260px; background: var(--panel); border-right: 1px solid var(--border);
-             display: flex; flex-direction: column; flex-shrink: 0; }
+             display: flex; flex-direction: column; flex-shrink: 0;
+             transition: transform .25s ease; z-index: 40; }
   #sidebar h2 { font-size: 13px; color: var(--dim); padding: 14px 16px 8px;
                 text-transform: uppercase; letter-spacing: .06em; }
   #newchat { margin: 0 12px 8px; padding: 10px; background: var(--accent); color: #fff;
@@ -38,7 +41,11 @@
   #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #topbar { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex;
             align-items: center; gap: 12px; }
-  #topbar h1 { font-size: 16px; font-weight: 600; }
+  #topbar h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+  #menu-btn { display: none; background: none; border: 0; color: var(--text);
+              font-size: 22px; cursor: pointer; padding: 4px 8px; line-height: 1; }
+  #scrim { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 30; }
+  #scrim.visible { display: block; }
   #model-badge { font-size: 12px; background: var(--panel2); border: 1px solid var(--border);
                  padding: 4px 10px; border-radius: 20px; color: var(--dim); }
   #model-badge b { color: var(--green); font-weight: 600; }
@@ -126,9 +133,35 @@
            border-radius: 12px; padding: 24px; }
   #stbox h3 { margin-bottom: 12px; } .probe { padding: 10px 0; border-top: 1px solid var(--border); font-size: 14px; }
   .pass { color: var(--green); } .fail { color: #e57373; }
+  /* mobile */
+  @media (max-width: 768px) {
+    #menu-btn { display: block; }
+    #sidebar { position: fixed; top: 0; left: 0; bottom: 0; transform: translateX(-100%);
+               box-shadow: 4px 0 24px rgba(0,0,0,.5); }
+    #sidebar.open { transform: translateX(0); }
+    #topbar { padding: 10px 12px; gap: 8px; }
+    #topbar h1 { font-size: 14px; }
+    #model-badge { display: none; }
+    .tabbtn { padding: 6px 10px; font-size: 12px; }
+    #chat { padding: 12px; gap: 14px; }
+    .msg { max-width: 100%; }
+    .bubble p, .bubble ul, .bubble ol { font-size: 15px; line-height: 1.6; }
+    .bubble code { font-size: 13px; word-break: break-word; }
+    .codeblock pre { font-size: 12px; }
+    #composer { padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+    #inputrow { max-width: 100%; gap: 8px; }
+    #msg { font-size: 16px; height: 48px; padding: 10px 14px; }
+    #send { padding: 0 18px; font-size: 15px; min-height: 48px; }
+    #terminal { padding: 12px; }
+    #termout { font-size: 12px; }
+    #pmodal { padding: 12px; }
+    #stmodal { padding: 24px 12px; }
+    .toolcall .tbody { font-size: 12px; }
+  }
 </style>
 </head>
 <body>
+<div id="scrim"></div>
 <div id="sidebar">
   <h2>Chats</h2>
   <button id="newchat">+ New chat</button>
@@ -140,6 +173,7 @@
 </div>
 <div id="main">
   <div id="topbar">
+    <button id="menu-btn" aria-label="Chats">&#9776;</button>
     <h1>Uncensored Harness</h1>
     <span id="model-badge">route: <b>pollinations</b> → horde fallback</span>
     <div class="spacer"></div>
@@ -354,7 +388,16 @@ document.getElementById("send").onclick = send;
 document.getElementById("msg").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
-document.getElementById("newchat").onclick = () => { threadId = ""; chat.innerHTML = ""; };
+document.getElementById("newchat").onclick = () => { threadId = ""; chat.innerHTML = ""; closeDrawer(); };
+
+// mobile sidebar drawer
+const sidebar = document.getElementById("sidebar"), scrim = document.getElementById("scrim");
+function closeDrawer() { sidebar.classList.remove("open"); scrim.classList.remove("visible"); }
+document.getElementById("menu-btn").onclick = () => {
+  const open = sidebar.classList.toggle("open");
+  scrim.classList.toggle("visible", open);
+};
+scrim.onclick = closeDrawer;
 
 // tabs
 const tabChat = document.getElementById("tab-chat"), tabTerm = document.getElementById("tab-term");

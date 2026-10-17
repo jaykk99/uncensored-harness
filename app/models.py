@@ -299,9 +299,10 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
          tools: list[dict] | None = None) -> tuple[str, str, list[dict], dict | None]:
     """Route a chat turn. Returns (text, source, tool_calls, raw_message).
 
-    raw_message is None (Horde) or OpenAI-format assistant message.
-    Horde (Stheno/Heretic/Rocinante) is PRIMARY because those are genuinely
-    uncensored. Pollinations (gpt-oss-20b) is the fallback for tool calls.
+    raw_message is the OpenAI-format assistant message (Pollinations) or None
+    (Horde). Horde (Stheno/Heretic/Rocinante) is PRIMARY because those are
+    genuinely uncensored. Pollinations (gpt-oss-20b) is the fallback for its
+    native tool calls. A final Horde retry closes out the legs.
     """
     # Primary: Horde (genuinely uncensored models)
     try:
@@ -315,8 +316,10 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         logger.info("horde refusal -> pollinations fallback")
     except Exception as e:
         logger.warning("horde failed, falling back to pollinations: %s", e)
-    # Fallback: Pollinations (native tool calls)
-    msg = pollinations_chat(messages, max_tokens, temperature, tools=tools)
+
+    # Fallback 1: Pollinations (native tool calls)
+    try:
+        msg = pollinations_chat(messages, max_tokens, temperature, tools=tools)
         tool_calls = []
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function", {})
@@ -329,43 +332,24 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
                                "name": fn.get("name", ""), "args": args})
         text = msg.get("content") or ""
         if not tool_calls and looks_like_refusal(text):
-            logger.info("pollinations refused; falling back to horde")
+            logger.info("pollinations refused; retrying horde once more")
             raise _Refusal()
         return text, "pollinations", tool_calls, msg
     except _Refusal:
-        logger.info("pollinations refusal -> horde fallback")
+        logger.info("pollinations refusal -> final horde attempt")
     except Exception as e:
-        logger.warning("pollinations failed, falling back to horde: %s", e)
-    # Fallback 1: Horde (tool calls emulated prompt-side by agent loop)
+        logger.warning("pollinations failed: %s", e)
+
+    # Fallback 2: Horde once more (a worker may have come online meanwhile)
     try:
         text = horde_chat(messages, max_tokens, temperature)
-        label = "horde"
+        label = "horde (retry)"
         if looks_like_refusal(text):
             label = "horde (refused too)"
         return text, label, [], None
     except Exception as e:
-        logger.warning("horde failed (%s); retrying pollinations", e)
-
-    # Fallback 2: Pollinations again — a rate-limit window often clears while
-    # the horde leg was being tried. One more patient round before giving up.
-    try:
-        msg = pollinations_chat(messages, max_tokens, temperature,
-                                tools=tools, retries=5)
-        tool_calls = []
-        for tc in msg.get("tool_calls") or []:
-            fn = tc.get("function", {})
-            import json as _json
-            try:
-                args = _json.loads(fn.get("arguments") or "{}")
-            except Exception:
-                args = {}
-            tool_calls.append({"id": tc.get("id") or f"call_{len(tool_calls)}",
-                               "name": fn.get("name", ""), "args": args})
-        text = msg.get("content") or ""
-        return text, "pollinations (retry)", tool_calls, msg
-    except Exception as e:
-        raise RuntimeError(f"all model legs failed (pollinations, horde, "
-                           f"pollinations-retry; last: {e})") from e
+        raise RuntimeError(f"all model legs failed (horde, pollinations, "
+                           f"horde-retry; last: {e})") from e
 
 
 class _Refusal(Exception):

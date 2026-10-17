@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import os
 import re
 import shlex
@@ -21,6 +22,8 @@ WORKDIR = os.environ.get("HARNESS_WORKDIR", os.path.expanduser("~/harness-work")
 SHOTS_DIR = os.path.join(WORKDIR, ".shots")
 os.makedirs(WORKDIR, exist_ok=True)
 os.makedirs(SHOTS_DIR, exist_ok=True)
+
+logger = logging.getLogger(__name__)
 
 COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
 
@@ -199,25 +202,70 @@ async def web_fetch(url: str, max_chars: int = 8000) -> str:
         return f"Fetch failed: {e}"
 
 
+def _strip_tags(s: str) -> str:
+    s = re.sub(r"<[^>]+>", "", s)
+    return re.sub(r"\s+", " ", s).replace("&amp;", "&").replace("&quot;", '"')\
+        .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").strip()
+
+
+async def _bing_rss_search(query: str, max_results: int) -> list[str]:
+    """Bing RSS: keyless, no anti-bot page, clean titles/links/snippets."""
+    async with _aclient(20) as c:
+        r = await c.get(
+            "https://www.bing.com/search",
+            params={"q": query, "format": "rss"},
+            headers={"User-Agent": "uncensored-harness/1.0"})
+        if r.status_code >= 400:
+            raise RuntimeError(f"bing HTTP {r.status_code}")
+    out = []
+    for m in re.finditer(r"<item>(.*?)</item>", r.text, re.S):
+        block = m.group(1)
+        def grab(tag):
+            mm = re.search(rf"<{tag}>(.*?)</{tag}>", block, re.S)
+            return _strip_tags(mm.group(1)) if mm else ""
+        title, link, desc = grab("title"), grab("link"), grab("description")
+        if title and link:
+            out.append(f"- {title}\n  {link}\n  {desc[:250]}")
+            if len(out) >= max_results:
+                break
+    return out
+
+
+async def _ddg_search(query: str, max_results: int) -> list[str]:
+    """DuckDuckGo HTML (fallback). Often serves an anti-bot page; bing first."""
+    async with _aclient(20) as c:
+        r = await c.get("https://html.duckduckgo.com/html/", params={"q": query},
+                        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                               "Chrome/128.0.0.0 Safari/537.36"})
+        if r.status_code >= 400:
+            raise RuntimeError(f"ddg HTTP {r.status_code}")
+    out = []
+    for m in re.finditer(
+            r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+            r.text, re.S):
+        url, title, snippet = m.group(1), m.group(2), m.group(3)
+        out.append(f"- {_strip_tags(title)}\n  {_strip_tags(url)}\n  {_strip_tags(snippet)[:250]}")
+        if len(out) >= max_results:
+            break
+    return out
+
+
 async def web_search(query: str, max_results: int = 5) -> str:
+    # Bing RSS primary (stable, keyless); DDG fallback when bing blips.
     try:
-        async with _aclient(25) as c:
-            r = await c.get("https://html.duckduckgo.com/html/", params={"q": query})
-            if r.status_code >= 400:
-                return f"Search failed: HTTP {r.status_code}"
-            out = []
-            for m in re.finditer(
-                    r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
-                    r.text, re.S):
-                url, title, snippet = m.group(1), m.group(2), m.group(3)
-                title = re.sub(r"<[^>]+>", "", title).strip()
-                snippet = re.sub(r"<[^>]+>", "", snippet).strip()
-                out.append(f"- {title}\n  {url}\n  {snippet}")
-                if len(out) >= max_results:
-                    break
-            return "\n".join(out) if out else "No results found."
+        out = await _bing_rss_search(query, max_results)
+        if out:
+            return "\n".join(out)
     except Exception as e:
-        return f"Search failed: {e}"
+        logger.warning("bing search failed: %s", e)
+    try:
+        out = await _ddg_search(query, max_results)
+        if out:
+            return "\n".join(out)
+    except Exception as e:
+        logger.warning("ddg search failed: %s", e)
+    return "No results found."
 
 
 # ---------------------------------------------------------------- composio

@@ -210,7 +210,8 @@ def _horde_submit(api: str, headers: dict, submit_body: dict,
                 sub = c.post(f"{api}/generate/text/async", headers=headers,
                              json=submit_body)
                 if sub.status_code in RETRYABLE_STATUS:
-                    last = RuntimeError(f"horde submit {sub.status_code}")
+                    last = RuntimeError(f"horde submit {sub.status_code}: "
+                                        f"{sub.text[:120]}")
                     logger.info("horde %s submit %s (attempt %d/3)",
                                 api, sub.status_code, attempt + 1)
                     _sleep_backoff(attempt)
@@ -325,12 +326,36 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         logger.info("pollinations refusal -> horde fallback")
     except Exception as e:
         logger.warning("pollinations failed, falling back to horde: %s", e)
-    # Fallback: Horde (tool calls emulated prompt-side by agent loop)
-    text = horde_chat(messages, max_tokens, temperature)
-    label = "horde"
-    if looks_like_refusal(text):
-        label = "horde (refused too)"
-    return text, label, [], None
+    # Fallback 1: Horde (tool calls emulated prompt-side by agent loop)
+    try:
+        text = horde_chat(messages, max_tokens, temperature)
+        label = "horde"
+        if looks_like_refusal(text):
+            label = "horde (refused too)"
+        return text, label, [], None
+    except Exception as e:
+        logger.warning("horde failed (%s); retrying pollinations", e)
+
+    # Fallback 2: Pollinations again — a rate-limit window often clears while
+    # the horde leg was being tried. One more patient round before giving up.
+    try:
+        msg = pollinations_chat(messages, max_tokens, temperature,
+                                tools=tools, retries=5)
+        tool_calls = []
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function", {})
+            import json as _json
+            try:
+                args = _json.loads(fn.get("arguments") or "{}")
+            except Exception:
+                args = {}
+            tool_calls.append({"id": tc.get("id") or f"call_{len(tool_calls)}",
+                               "name": fn.get("name", ""), "args": args})
+        text = msg.get("content") or ""
+        return text, "pollinations (retry)", tool_calls, msg
+    except Exception as e:
+        raise RuntimeError(f"all model legs failed (pollinations, horde, "
+                           f"pollinations-retry; last: {e})") from e
 
 
 class _Refusal(Exception):

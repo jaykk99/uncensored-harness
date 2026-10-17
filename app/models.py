@@ -250,14 +250,21 @@ def _horde_submit(api: str, headers: dict, submit_body: dict,
 def _horde_generate(prompt: str, max_tokens: int, temperature: float,
                     timeout_s: int,
                     progress: Optional[ProgressFn] = None,
-                    leg: str = "horde") -> str:
+                    leg: str = "horde",
+                    preferred_model: str = "") -> str:
     api_key = os.environ.get("HORDE_API_KEY", "").strip() or HORDE_ANON_KEY
     headers = {"apikey": api_key, "Content-Type": "application/json", "User-Agent": HORDE_UA}
+    # Preferred model (from the UI picker) goes first; the rest stay as
+    # fallback so a quiet worker never stalls the turn.
+    models = list(HORDE_UNCENSORED_MODELS)
+    if preferred_model in models:
+        models.remove(preferred_model)
+        models.insert(0, preferred_model)
     submit_body = {
         "prompt": prompt,
         "params": {"max_context_length": 8192, "max_length": max_tokens,
                    "temperature": temperature},
-        "models": HORDE_UNCENSORED_MODELS,
+        "models": models,
     }
     last_err: Exception | None = None
     for api in HORDE_APIS:
@@ -306,7 +313,8 @@ def _horde_generate(prompt: str, max_tokens: int, temperature: float,
 def horde_chat(messages: list[dict], max_tokens: int = 1200,
                temperature: float = 0.7, timeout_s: int = 240,
                progress: Optional[ProgressFn] = None,
-               leg: str = "horde") -> str:
+               leg: str = "horde",
+               preferred_model: str = "") -> str:
     """Flatten messages to an instruction prompt and run on Horde."""
     parts: list[str] = []
     for m in messages:
@@ -324,12 +332,14 @@ def horde_chat(messages: list[dict], max_tokens: int = 1200,
             parts.append(f"Tool result: {content}")
     prompt = "\n\n".join(parts) + "\nAssistant:"
     return _horde_generate(prompt, max_tokens, temperature, timeout_s,
-                           progress=progress, leg=leg)
+                           progress=progress, leg=leg,
+                           preferred_model=preferred_model)
 
 
 def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
          tools: list[dict] | None = None,
-         progress: Optional[ProgressFn] = None) -> tuple[str, str, list[dict], dict | None]:
+         progress: Optional[ProgressFn] = None,
+         preferred_model: str = "") -> tuple[str, str, list[dict], dict | None]:
     """Route a chat turn. Returns (text, source, tool_calls, raw_message).
 
     raw_message is the OpenAI-format assistant message (Pollinations) or None
@@ -346,7 +356,8 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         progress("Horde leg 1: contacting uncensored workers (Stheno/Heretic/Rocinante)…")
     try:
         text = horde_chat(messages, max_tokens, temperature, timeout_s=180,
-                           progress=progress, leg="Horde leg 1")
+                           progress=progress, leg="Horde leg 1",
+                           preferred_model=preferred_model)
         label = "horde"
         if looks_like_refusal(text):
             label = "horde (refused too)"
@@ -392,7 +403,8 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
     # Fallback 2: Horde once more (a worker may have come online meanwhile)
     try:
         text = horde_chat(messages, max_tokens, temperature, timeout_s=120,
-                           progress=progress, leg="Horde leg 2 (final)")
+                           progress=progress, leg="Horde leg 2 (final)",
+                           preferred_model=preferred_model)
         label = "horde (retry)"
         if looks_like_refusal(text):
             label = "horde (refused too)"

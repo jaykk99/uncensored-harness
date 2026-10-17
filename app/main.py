@@ -50,6 +50,8 @@ class ChatRequest(BaseModel):
     message: str
     thread_id: str = ""
     access_code: str = ""
+    model: str = ""        # preferred Horde model id from the UI picker ("" = auto)
+    web_search: bool = False
 
 
 class RunRequest(BaseModel):
@@ -142,7 +144,10 @@ async def chat(req: ChatRequest):
                 # legs stall, end the SSE stream with a clear error instead.
                 try:
                     text = await asyncio.wait_for(
-                        agent_mod.run_turn(history, collect), timeout=660)
+                        agent_mod.run_turn(history, collect,
+                                           model=req.model or "",
+                                           web_search=req.web_search),
+                        timeout=660)
                 except asyncio.TimeoutError:
                     err = ("Timed out after 11 minutes with no answer. "
                            "The model workers are likely overloaded — "

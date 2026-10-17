@@ -94,13 +94,24 @@ def _synth_assistant_msg(clean: str, calls: list[dict]) -> dict:
     }
 
 
-async def run_turn(history: list[dict], emit) -> str:
-    """Run one agent turn. emit(event_dict) is called for SSE. Returns final text."""
+async def run_turn(history: list[dict], emit, model: str = "",
+               web_search: bool = False) -> str:
+    """Run one agent turn. emit(event_dict) is called for SSE. Returns final text.
+
+    model: preferred Horde model id from the UI picker ("" = auto-route).
+    web_search: when True, the agent is told to ground answers with web_search.
+    """
     messages: list[dict] = [{"role": "system",
                              "content": SYSTEM_PROMPT + "\n\n" + TOOL_FORMAT_HINT}]
     for m in history:
         if m["role"] in ("user", "assistant") and isinstance(m.get("content"), str):
             messages.append({"role": m["role"], "content": m["content"]})
+    if web_search:
+        # Tell the agent to ground this turn with its web tools.
+        messages.append({"role": "user",
+                         "content": "[Web search is ON for this question. "
+                                    "Use web_search / web_fetch to ground your "
+                                    "answer in current information before replying.]"})
 
     await emit({"type": "thinking", "text": "Thinking…"})
 
@@ -130,7 +141,7 @@ async def run_turn(history: list[dict], emit) -> str:
     for _ in range(MAX_ITERS):
         text, source, native_calls, raw_msg = await asyncio.to_thread(
             models.chat, messages, 1500, 0.7, T.openai_tools(),
-            progress=_progress)
+            progress=_progress, preferred_model=model)
         clean, fenced_calls = _parse_fenced_calls(text)
         calls = native_calls or fenced_calls
 

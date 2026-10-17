@@ -348,13 +348,29 @@ function newAssistant() {
   return d.querySelector(".bubble");
 }
 
+let thinkTimer = null, thinkStart = 0;
+function renderThinking(t) {
+  const s = Math.floor((Date.now() - thinkStart) / 1000);
+  t.innerHTML = `<div class="tdots"><span></span><span></span><span></span></div><span>${esc(t.dataset.text || "Thinking…")} <span style="opacity:.55">(${s}s)</span></span>`;
+}
 function setThinking(bubble, text) {
   let t = bubble.querySelector(".thinking");
   if (!t) { t = document.createElement("div"); t.className = "thinking"; bubble.appendChild(t); }
-  t.innerHTML = `<div class="tdots"><span></span><span></span><span></span></div><span>${esc(text||"Thinking…")}</span>`;
+  t.dataset.text = text || "Thinking…";
+  thinkStart = Date.now();
+  renderThinking(t);
+  if (thinkTimer) clearInterval(thinkTimer);
+  thinkTimer = setInterval(() => {
+    const cur = document.querySelector(".thinking");
+    if (cur) renderThinking(cur);
+    else { clearInterval(thinkTimer); thinkTimer = null; }
+  }, 1000);
   chat.scrollTop = chat.scrollHeight;
 }
-function clearThinking(bubble) { bubble.querySelectorAll(".thinking").forEach(e => e.remove()); }
+function clearThinking(bubble) {
+  bubble.querySelectorAll(".thinking").forEach(e => e.remove());
+  if (thinkTimer) { clearInterval(thinkTimer); thinkTimer = null; }
+}
 
 function appendText(bubble, text) {
   clearThinking(bubble);
@@ -402,8 +418,12 @@ async function send() {
   addUser(text);
   const bubble = newAssistant();
   setThinking(bubble, "Thinking…");
+  // Client-side backstop: never spin forever. The server caps turns at
+  // 11 minutes; abort a few seconds later if the stream went quiet.
+  const ctrl = new AbortController();
+  const stallTimer = setTimeout(() => ctrl.abort(), 12 * 60 * 1000);
   try {
-    const r = await fetch("/api/chat", { method: "POST",
+    const r = await fetch("/api/chat", { method: "POST", signal: ctrl.signal,
       headers: {"Content-Type":"application/json"},
       body: JSON.stringify({ message: text, thread_id: threadId, access_code: AC }) });
     if (!r.ok) { clearThinking(bubble); bubble.innerHTML += `<div class="err">HTTP ${r.status}</div>`; return; }
@@ -428,9 +448,17 @@ async function send() {
           document.getElementById("model-badge").innerHTML = `route: <b>${esc(ev.model||"?")}</b> → horde fallback`; }
       }
     }
-  } catch(e) { clearThinking(bubble); bubble.innerHTML += `<div class="err">failed: ${esc(String(e))}</div>`; }
-  sending = false; document.getElementById("send").disabled = false;
-  loadThreads();
+  } catch(e) {
+    clearThinking(bubble);
+    const msg = (e && e.name === "AbortError")
+      ? "Timed out after 12 minutes with no response. Try again."
+      : "failed: " + e;
+    bubble.innerHTML += `<div class="err">${esc(String(msg))}</div>`;
+  } finally {
+    clearTimeout(stallTimer);
+    sending = false; document.getElementById("send").disabled = false;
+    loadThreads();
+  }
 }
 
 document.getElementById("send").onclick = send;

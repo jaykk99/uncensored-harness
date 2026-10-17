@@ -17,10 +17,17 @@ import logging
 import os
 import random
 import time
+from typing import Callable, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Progress callback: sync callable taking a status string. It may be invoked
+# from a worker thread (agent runs chat() via asyncio.to_thread), so callers
+# must make it thread-safe. The agent bridges it to SSE "thinking" events so
+# the UI shows live status instead of a frozen "Thinking…".
+ProgressFn = Callable[[str], None]
 
 POLLINATIONS_URL = "https://text.pollinations.ai/openai/v1/chat/completions"
 POLLINATIONS_MODEL = "openai"  # resolves to gpt-oss-20b
@@ -47,10 +54,11 @@ _MIN_CALL_GAP_S = 1.5
 _last_pollinations_ts = 0.0
 
 
-def _sleep_backoff(attempt: int, base: float = 2.0, cap: float = 15.0) -> None:
-    """Exponential backoff with jitter. attempt is 0-based."""
+def _sleep_backoff(attempt: int, base: float = 2.0, cap: float = 15.0) -> float:
+    """Exponential backoff with jitter. attempt is 0-based. Returns delay."""
     delay = min(cap, base * (2 ** attempt)) + random.uniform(0, 1.0)
     time.sleep(delay)
+    return delay
 
 
 def _pace_pollinations() -> None:
@@ -146,7 +154,8 @@ def _aclient(timeout: int) -> httpx.AsyncClient:
 def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
                       temperature: float = 0.7, timeout: int = 90,
                       tools: list[dict] | None = None,
-                      retries: int = 4) -> dict:
+                      retries: int = 4,
+                      progress: Optional[ProgressFn] = None) -> dict:
     """Call Pollinations OpenAI-compatible endpoint with retry/backoff.
 
     Transient rate limits (402/429) and upstream blips are retried; only
@@ -164,6 +173,8 @@ def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
     last_exc: Exception | None = None
     for attempt in range(retries):
         _pace_pollinations()
+        if progress:
+            progress(f"Pollinations: attempt {attempt + 1}/{retries}…")
         try:
             with _client(timeout) as c:
                 r = c.post(POLLINATIONS_URL, json=body,
@@ -172,6 +183,9 @@ def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
                 last_exc = RuntimeError(f"pollinations HTTP {r.status_code}")
                 logger.info("pollinations %s (attempt %d/%d), backing off",
                             r.status_code, attempt + 1, retries)
+                if progress and attempt < retries - 1:
+                    progress(f"Pollinations rate-limited (HTTP {r.status_code}) — "
+                             f"retrying…")
                 _sleep_backoff(attempt)
                 continue
             r.raise_for_status()
@@ -193,6 +207,8 @@ def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
             logger.info("pollinations network error (attempt %d/%d): %s",
                         attempt + 1, retries, e)
             if attempt < retries - 1:
+                if progress:
+                    progress("Pollinations network error — retrying…")
                 _sleep_backoff(attempt)
                 continue
             raise RuntimeError(f"pollinations network failure: {e}") from e
@@ -232,7 +248,9 @@ def _horde_submit(api: str, headers: dict, submit_body: dict,
 
 
 def _horde_generate(prompt: str, max_tokens: int, temperature: float,
-                    timeout_s: int) -> str:
+                    timeout_s: int,
+                    progress: Optional[ProgressFn] = None,
+                    leg: str = "horde") -> str:
     api_key = os.environ.get("HORDE_API_KEY", "").strip() or HORDE_ANON_KEY
     headers = {"apikey": api_key, "Content-Type": "application/json", "User-Agent": HORDE_UA}
     submit_body = {
@@ -244,12 +262,17 @@ def _horde_generate(prompt: str, max_tokens: int, temperature: float,
     last_err: Exception | None = None
     for api in HORDE_APIS:
         try:
+            if progress:
+                progress(f"{leg}: submitting job to Horde…")
             job_id = _horde_submit(api, headers, submit_body)
             poll_h = {"apikey": api_key, "User-Agent": HORDE_UA}
             with _client(30) as c:
                 deadline = time.time() + timeout_s
+                start = time.time()
+                last_beat = -999
                 while time.time() < deadline:
                     time.sleep(4)
+                    elapsed = int(time.time() - start)
                     try:
                         chk = c.get(f"{api}/generate/text/status/{job_id}",
                                     headers=poll_h)
@@ -260,6 +283,12 @@ def _horde_generate(prompt: str, max_tokens: int, temperature: float,
                             raise RuntimeError("horde: job vanished")
                         continue
                     s = chk.json()
+                    if progress and elapsed - last_beat >= 15:
+                        last_beat = elapsed
+                        qpos = s.get("queue_position")
+                        extra = f", queue position {qpos}" if qpos else ""
+                        progress(f"{leg}: waiting for a worker… "
+                                 f"{elapsed}s elapsed{extra}")
                     if s.get("faulted"):
                         raise RuntimeError("horde: job faulted")
                     if s.get("done"):
@@ -275,7 +304,9 @@ def _horde_generate(prompt: str, max_tokens: int, temperature: float,
 
 
 def horde_chat(messages: list[dict], max_tokens: int = 1200,
-               temperature: float = 0.7, timeout_s: int = 240) -> str:
+               temperature: float = 0.7, timeout_s: int = 240,
+               progress: Optional[ProgressFn] = None,
+               leg: str = "horde") -> str:
     """Flatten messages to an instruction prompt and run on Horde."""
     parts: list[str] = []
     for m in messages:
@@ -292,21 +323,30 @@ def horde_chat(messages: list[dict], max_tokens: int = 1200,
         elif role == "tool":
             parts.append(f"Tool result: {content}")
     prompt = "\n\n".join(parts) + "\nAssistant:"
-    return _horde_generate(prompt, max_tokens, temperature, timeout_s)
+    return _horde_generate(prompt, max_tokens, temperature, timeout_s,
+                           progress=progress, leg=leg)
 
 
 def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
-         tools: list[dict] | None = None) -> tuple[str, str, list[dict], dict | None]:
+         tools: list[dict] | None = None,
+         progress: Optional[ProgressFn] = None) -> tuple[str, str, list[dict], dict | None]:
     """Route a chat turn. Returns (text, source, tool_calls, raw_message).
 
     raw_message is the OpenAI-format assistant message (Pollinations) or None
     (Horde). Horde (Stheno/Heretic/Rocinante) is PRIMARY because those are
     genuinely uncensored. Pollinations (gpt-oss-20b) is the fallback for its
     native tool calls. A final Horde retry closes out the legs.
+
+    progress, when given, receives human-readable status strings as each leg
+    runs (submission, queue waits, backoffs, leg transitions) so the UI can
+    show live progress instead of a frozen "Thinking…".
     """
     # Primary: Horde (genuinely uncensored models)
+    if progress:
+        progress("Horde leg 1: contacting uncensored workers (Stheno/Heretic/Rocinante)…")
     try:
-        text = horde_chat(messages, max_tokens, temperature)
+        text = horde_chat(messages, max_tokens, temperature, timeout_s=180,
+                           progress=progress, leg="Horde leg 1")
         label = "horde"
         if looks_like_refusal(text):
             label = "horde (refused too)"
@@ -314,12 +354,17 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         return text, label, [], None
     except _Refusal:
         logger.info("horde refusal -> pollinations fallback")
+        if progress:
+            progress("Horde refused — trying Pollinations…")
     except Exception as e:
         logger.warning("horde failed, falling back to pollinations: %s", e)
+        if progress:
+            progress(f"Horde leg failed ({e}) — trying Pollinations…")
 
     # Fallback 1: Pollinations (native tool calls)
     try:
-        msg = pollinations_chat(messages, max_tokens, temperature, tools=tools)
+        msg = pollinations_chat(messages, max_tokens, temperature, timeout=60,
+                                tools=tools, retries=3, progress=progress)
         tool_calls = []
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function", {})
@@ -337,12 +382,17 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         return text, "pollinations", tool_calls, msg
     except _Refusal:
         logger.info("pollinations refusal -> final horde attempt")
+        if progress:
+            progress("Pollinations refused — final Horde retry…")
     except Exception as e:
         logger.warning("pollinations failed: %s", e)
+        if progress:
+            progress(f"Pollinations failed ({e}) — final Horde retry…")
 
     # Fallback 2: Horde once more (a worker may have come online meanwhile)
     try:
-        text = horde_chat(messages, max_tokens, temperature)
+        text = horde_chat(messages, max_tokens, temperature, timeout_s=120,
+                           progress=progress, leg="Horde leg 2 (final)")
         label = "horde (retry)"
         if looks_like_refusal(text):
             label = "horde (refused too)"

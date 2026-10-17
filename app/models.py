@@ -2,12 +2,11 @@
 
 Chain (never an RLHF-tuned refuser — no GPT, no Claude, no Gemini):
   1. Pollinations (primary) — keyless, OpenAI-compatible, gpt-oss-20b
-     (open weights). VERIFIED 2026-10-15: alive, and answered a dual-use
-     hobby probe directly with zero refusal framing.
+     (open weights). Anonymous tier is rate-limited: transient 402/429s are
+     normal under load, so calls are paced and retried with backoff.
   2. AI Horde (fallback) — keyless, genuinely uncensored workers:
-     Stheno, Heretic, Rocinante lineages. VERIFIED 2026-10-15: workers
-     online for koboldcpp/L3-8B-Stheno-v3.2, gemma Heretic variants,
-     koboldcpp/Rocinante-X-12B-v1.
+     Stheno, Heretic, Rocinante lineages. Anonymous submits can transiently
+     403/429; retried with backoff across both API endpoints.
 
 chat() tries Pollinations, falls back to Horde on any failure.
 """
@@ -16,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import time
 
 import httpx
@@ -37,6 +37,31 @@ HORDE_UNCENSORED_MODELS = [
     "koboldcpp/Gemma-4-E4B-it-Ultra-Uncensored-Heretic",
     "koboldcpp/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q4_K_M",
 ]
+
+# HTTP statuses worth retrying (rate limits + transient upstream errors).
+RETRYABLE_STATUS = {402, 408, 425, 429, 500, 502, 503, 504}
+
+# Pacing: minimum seconds between Pollinations calls (anonymous tier is
+# IP-rate-limited; back-to-back calls trigger 402s).
+_MIN_CALL_GAP_S = 1.5
+_last_pollinations_ts = 0.0
+
+
+def _sleep_backoff(attempt: int, base: float = 2.0, cap: float = 15.0) -> None:
+    """Exponential backoff with jitter. attempt is 0-based."""
+    delay = min(cap, base * (2 ** attempt)) + random.uniform(0, 1.0)
+    time.sleep(delay)
+
+
+def _pace_pollinations() -> None:
+    """Wait out the min gap since the last Pollinations call."""
+    global _last_pollinations_ts
+    now = time.time()
+    wait = _MIN_CALL_GAP_S - (now - _last_pollinations_ts)
+    if wait > 0:
+        time.sleep(wait)
+    _last_pollinations_ts = time.time()
+
 
 # Phrases that signal a refusal / RLHF moralizing. A genuinely uncensored
 # model answering legitimately never emits these.
@@ -120,8 +145,13 @@ def _aclient(timeout: int) -> httpx.AsyncClient:
 
 def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
                       temperature: float = 0.7, timeout: int = 90,
-                      tools: list[dict] | None = None) -> dict:
-    """Call Pollinations OpenAI-compatible endpoint. Returns the raw choice message dict."""
+                      tools: list[dict] | None = None,
+                      retries: int = 4) -> dict:
+    """Call Pollinations OpenAI-compatible endpoint with retry/backoff.
+
+    Transient rate limits (402/429) and upstream blips are retried; only
+    gives up after `retries` attempts. Returns the raw choice message dict.
+    """
     body: dict = {
         "model": POLLINATIONS_MODEL,
         "messages": messages,
@@ -131,15 +161,73 @@ def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"
-    with _client(timeout) as c:
-        r = c.post(POLLINATIONS_URL, json=body,
-                   headers={"Content-Type": "application/json"})
-        r.raise_for_status()
-        data = r.json()
-    choices = data.get("choices") or []
-    if not choices:
-        raise RuntimeError("pollinations: empty choices")
-    return choices[0]["message"]
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        _pace_pollinations()
+        try:
+            with _client(timeout) as c:
+                r = c.post(POLLINATIONS_URL, json=body,
+                           headers={"Content-Type": "application/json"})
+            if r.status_code in RETRYABLE_STATUS:
+                last_exc = RuntimeError(f"pollinations HTTP {r.status_code}")
+                logger.info("pollinations %s (attempt %d/%d), backing off",
+                            r.status_code, attempt + 1, retries)
+                _sleep_backoff(attempt)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            choices = data.get("choices") or []
+            if not choices:
+                # Empty choices can be transient under load; retry once.
+                last_exc = RuntimeError("pollinations: empty choices")
+                if attempt < retries - 1:
+                    _sleep_backoff(attempt)
+                    continue
+                raise last_exc
+            return choices[0]["message"]
+        except httpx.HTTPStatusError as e:
+            raise RuntimeError(f"pollinations HTTP {e.response.status_code}: "
+                               f"{e.response.text[:200]}") from e
+        except httpx.HTTPError as e:  # timeouts / conn resets — retriable
+            last_exc = e
+            logger.info("pollinations network error (attempt %d/%d): %s",
+                        attempt + 1, retries, e)
+            if attempt < retries - 1:
+                _sleep_backoff(attempt)
+                continue
+            raise RuntimeError(f"pollinations network failure: {e}") from e
+    raise RuntimeError(f"pollinations kept failing after {retries} attempts "
+                       f"(last: {last_exc})")
+
+
+def _horde_submit(api: str, headers: dict, submit_body: dict,
+                  timeout: int = 30) -> str:
+    """Submit a generation; returns job id. Retries transient 403/429/5xx."""
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            with _client(timeout) as c:
+                sub = c.post(f"{api}/generate/text/async", headers=headers,
+                             json=submit_body)
+                if sub.status_code in RETRYABLE_STATUS:
+                    last = RuntimeError(f"horde submit {sub.status_code}")
+                    logger.info("horde %s submit %s (attempt %d/3)",
+                                api, sub.status_code, attempt + 1)
+                    _sleep_backoff(attempt)
+                    continue
+                sub.raise_for_status()
+                job_id = sub.json().get("id")
+                if not job_id:
+                    raise RuntimeError("horde: no job id")
+                return job_id
+        except RuntimeError:
+            raise
+        except Exception as e:  # network blips — retriable
+            last = e
+            logger.info("horde %s submit network error (attempt %d/3): %s",
+                        api, attempt + 1, e)
+            _sleep_backoff(attempt)
+    raise RuntimeError(f"horde submit failed (last: {last})")
 
 
 def _horde_generate(prompt: str, max_tokens: int, temperature: float,
@@ -155,20 +243,20 @@ def _horde_generate(prompt: str, max_tokens: int, temperature: float,
     last_err: Exception | None = None
     for api in HORDE_APIS:
         try:
+            job_id = _horde_submit(api, headers, submit_body)
+            poll_h = {"apikey": api_key, "User-Agent": HORDE_UA}
             with _client(30) as c:
-                sub = c.post(f"{api}/generate/text/async", headers=headers, json=submit_body)
-                if sub.status_code in (403, 429):
-                    raise RuntimeError(f"horde submit {sub.status_code}")
-                sub.raise_for_status()
-                job_id = sub.json().get("id")
-                if not job_id:
-                    raise RuntimeError("horde: no job id")
-                poll_h = {"apikey": api_key, "User-Agent": HORDE_UA}
                 deadline = time.time() + timeout_s
                 while time.time() < deadline:
                     time.sleep(4)
-                    chk = c.get(f"{api}/generate/text/status/{job_id}", headers=poll_h)
+                    try:
+                        chk = c.get(f"{api}/generate/text/status/{job_id}",
+                                    headers=poll_h)
+                    except httpx.HTTPError:
+                        continue  # transient poll error — keep polling
                     if chk.status_code != 200:
+                        if chk.status_code == 404:
+                            raise RuntimeError("horde: job vanished")
                         continue
                     s = chk.json()
                     if s.get("faulted"):

@@ -2,13 +2,15 @@
 
 Standalone AI agent harness with **verified uncensored models only** — never GPT, Claude, Gemini, or any RLHF-tuned refuser.
 
-## Model routing (verified 2026-10-15)
+## Model routing (horde primary since 2026-10-17)
 
-1. **Pollinations** (primary) — keyless, OpenAI-compatible, `gpt-oss-20b` open weights.
-   Verified: alive, answered a dual-use hobby probe directly with zero refusal framing.
-2. **AI Horde** (fallback) — keyless, genuinely uncensored workers, verified online:
-   Stheno (`koboldcpp/L3-8B-Stheno-v3.2`, 4 workers), Heretic variants,
-   Rocinante (`koboldcpp/Rocinante-X-12B-v1`, 2 workers).
+1. **AI Horde** (primary) — keyless, genuinely uncensored workers:
+   Stheno (`koboldcpp/L3-8B-Stheno-v3.2`), Heretic variants, Rocinante
+   (`koboldcpp/Rocinante-X-12B-v1`). Verified genuinely uncensored.
+2. **Pollinations** (fallback) — keyless, OpenAI-compatible, `gpt-oss-20b`
+   open weights. Kept for its native tool-call support; answers are
+   refusal-probed and a refused/failing leg retries Horde once more.
+   A final Horde retry closes out the legs if Pollinations fails.
 
 ## Capabilities
 

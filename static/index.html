@@ -201,7 +201,7 @@
   <div id="topbar">
     <button id="menu-btn" aria-label="Chats">&#9776;</button>
     <h1>Uncensored Harness</h1>
-    <span id="model-badge">route: <b>pollinations</b> → horde fallback</span>
+    <span id="model-badge">route: <b>horde</b> → pollinations fallback</span>
     <div class="spacer"></div>
     <button class="tabbtn active" id="tab-chat">Chat</button>
     <button class="tabbtn" id="tab-term">Terminal</button>
@@ -445,7 +445,7 @@ async function send() {
         else if (ev.type === "shot") appendShot(bubble, ev.shot, ev.caption);
         else if (ev.type === "error") { clearThinking(bubble); bubble.innerHTML += `<div class="err">${esc(ev.error)}</div>`; }
         else if (ev.type === "done") { clearThinking(bubble);
-          document.getElementById("model-badge").innerHTML = `route: <b>${esc(ev.model||"?")}</b> → horde fallback`; }
+          document.getElementById("model-badge").innerHTML = `route: <b>${esc(ev.model||"?")}</b> (horde primary → pollinations fallback)`; }
       }
     }
   } catch(e) {

@@ -68,8 +68,8 @@ def health():
     return {
         "ok": True,
         "service": "uncensored-harness",
-        "primary": "pollinations (gpt-oss-20b, verified uncensored)",
-        "fallback": "ai-horde (stheno/heretic/rocinante, verified online)",
+        "primary": "ai-horde (stheno/heretic/rocinante, genuinely uncensored)",
+        "fallback": "pollinations (gpt-oss-20b, native tool calls)",
         "never": ["gpt", "claude", "gemini"],
         "composio_configured": bool(os.environ.get("COMPOSIO_API_KEY", "").strip()),
         "access_gate": bool(_access_code()),

@@ -1,14 +1,17 @@
 """Verified uncensored model routing.
 
 Chain (never an RLHF-tuned refuser — no GPT, no Claude, no Gemini):
-  1. Pollinations (primary) — keyless, OpenAI-compatible, gpt-oss-20b
-     (open weights). Anonymous tier is rate-limited: transient 402/429s are
-     normal under load, so calls are paced and retried with backoff.
-  2. AI Horde (fallback) — keyless, genuinely uncensored workers:
-     Stheno, Heretic, Rocinante lineages. Anonymous submits can transiently
+  1. AI Horde (primary) — keyless, genuinely uncensored workers: Stheno,
+     Heretic, Rocinante lineages. Anonymous submits can transiently
      403/429; retried with backoff across both API endpoints.
+  2. Pollinations (fallback) — keyless, OpenAI-compatible, gpt-oss-20b
+     (open weights), kept for its native tool-call support. Anonymous tier
+     is rate-limited: transient 402/429s are normal under load, so calls
+     are paced and retried with backoff. Refusals are detected and the
+     turn retries Horde.
 
-chat() tries Pollinations, falls back to Horde on any failure.
+chat() tries Horde first, falls back to Pollinations on any failure, and
+does a final Horde retry if Pollinations refuses or fails.
 """
 
 from __future__ import annotations

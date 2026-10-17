@@ -103,12 +103,34 @@ async def run_turn(history: list[dict], emit) -> str:
             messages.append({"role": m["role"], "content": m["content"]})
 
     await emit({"type": "thinking", "text": "Thinking…"})
+
+    # models.chat runs in a worker thread (asyncio.to_thread) and can sit in
+    # Horde queues for minutes. Bridge its sync progress callback to async SSE
+    # "thinking" events so the UI shows live status, not a frozen spinner.
+    loop = asyncio.get_running_loop()
+
+    def _progress(text: str) -> None:
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                emit({"type": "thinking", "text": text}), loop)
+
+            def _done(f):
+                try:
+                    f.result()
+                except Exception:
+                    pass  # progress is best-effort; never break the turn
+
+            fut.add_done_callback(_done)
+        except Exception:
+            pass
+
     final_text = ""
     source = "?"
 
     for _ in range(MAX_ITERS):
         text, source, native_calls, raw_msg = await asyncio.to_thread(
-            models.chat, messages, 1500, 0.7, T.openai_tools())
+            models.chat, messages, 1500, 0.7, T.openai_tools(),
+            progress=_progress)
         clean, fenced_calls = _parse_fenced_calls(text)
         calls = native_calls or fenced_calls
 

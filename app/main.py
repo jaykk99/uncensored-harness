@@ -138,7 +138,21 @@ async def chat(req: ChatRequest):
                     events.append(ev)
                     await queue.put(f"data: {json.dumps(ev)}\n\n")
 
-                text = await agent_mod.run_turn(history, collect)
+                # Hard cap: a turn must never "think forever". If the model
+                # legs stall, end the SSE stream with a clear error instead.
+                try:
+                    text = await asyncio.wait_for(
+                        agent_mod.run_turn(history, collect), timeout=660)
+                except asyncio.TimeoutError:
+                    err = ("Timed out after 11 minutes with no answer. "
+                           "The model workers are likely overloaded — "
+                           "try again in a bit.")
+                    logger.warning("agent turn timed out for thread %s",
+                                   thread_id)
+                    await queue.put(
+                        f"data: {json.dumps({'type': 'error', 'error': err})}\n\n")
+                    memory.add_message(thread_id, "assistant", f"[timeout] {err}")
+                    return
                 memory.add_message(thread_id, "assistant", text or "(no reply)")
             except Exception as e:
                 logger.exception("agent turn failed")

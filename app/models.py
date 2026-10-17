@@ -299,14 +299,24 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
          tools: list[dict] | None = None) -> tuple[str, str, list[dict], dict | None]:
     """Route a chat turn. Returns (text, source, tool_calls, raw_message).
 
-    raw_message is the OpenAI-format assistant message (Pollinations) or None
-    (Horde). Tries Pollinations (native tool calls) first. Falls back to Horde
-    when Pollinations errors OR refuses (refusal-looking response, no tool
-    calls) — the "skip the sorry, try the next model" behavior.
+    raw_message is None (Horde) or OpenAI-format assistant message.
+    Horde (Stheno/Heretic/Rocinante) is PRIMARY because those are genuinely
+    uncensored. Pollinations (gpt-oss-20b) is the fallback for tool calls.
     """
-    # Primary: Pollinations
+    # Primary: Horde (genuinely uncensored models)
     try:
-        msg = pollinations_chat(messages, max_tokens, temperature, tools=tools)
+        text = horde_chat(messages, max_tokens, temperature)
+        label = "horde"
+        if looks_like_refusal(text):
+            label = "horde (refused too)"
+            raise _Refusal()
+        return text, label, [], None
+    except _Refusal:
+        logger.info("horde refusal -> pollinations fallback")
+    except Exception as e:
+        logger.warning("horde failed, falling back to pollinations: %s", e)
+    # Fallback: Pollinations (native tool calls)
+    msg = pollinations_chat(messages, max_tokens, temperature, tools=tools)
         tool_calls = []
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function", {})

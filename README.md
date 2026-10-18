@@ -37,6 +37,8 @@ Env: `HARNESS_ACCESS_CODE` (optional gate), `HARNESS_WORKDIR` (default ~/harness
 - `GET /` — chat UI
 - `GET /api/health` — liveness + routing
 - `GET /api/self-test` — refusal probes, verdict
+- `GET /api/models` — model list grouped by provider (access_code)
+- `GET /api/threads` — list threads (access_code)
 - `POST /api/chat` — SSE agent turn
 - `POST /api/run` — python/javascript code runner
 - `POST /api/shell` — terminal

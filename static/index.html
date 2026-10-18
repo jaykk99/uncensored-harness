@@ -951,7 +951,7 @@ async function send() {
         try { ev = JSON.parse(line.slice(5)); } catch (e) { continue; }
         if (ev.type === "thread") threadId = ev.thread_id;
         else if (ev.type === "thinking") setThinking(bubble, ev.text);
-        else if (ev.type === "text") appendText(bubble, ev.text);
+        else if (ev.type === "text" || ev.type === "token") appendText(bubble, ev.text);
         else if (ev.type === "tool") appendTool(bubble, ev.name, ev.args);
         else if (ev.type === "tool_result") appendToolResult(bubble, ev.name, ev.output);
         else if (ev.type === "shot") appendShot(bubble, ev.shot, ev.caption);

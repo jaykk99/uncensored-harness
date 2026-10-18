@@ -16,6 +16,7 @@ does a final Horde retry if Pollinations refuses or fails.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -154,15 +155,83 @@ def _aclient(timeout: int) -> httpx.AsyncClient:
                              verify=_verify())
 
 
+def _pollinations_stream(body: dict, timeout: int,
+                         on_token: Callable[[str], None]) -> dict:
+    """SSE-streaming variant of pollinations_chat. Raises on any failure.
+
+    Each content chunk is forwarded to on_token immediately so the UI can
+    render tokens as they arrive instead of waiting for the full response.
+    The full text is still accumulated and returned, so tool-call parsing
+    is unaffected. No retries here: once tokens have been emitted the UI
+    already shows partial text, so a silent retry would duplicate it — a
+    mid-stream failure aborts the leg and the router fails over.
+    """
+    stream_body = dict(body)
+    stream_body["stream"] = True
+    content_parts: list[str] = []
+    tool_calls: dict[int, dict] = {}
+    with _client(timeout) as c:
+        with c.stream("POST", POLLINATIONS_URL, json=stream_body,
+                      headers={"Content-Type": "application/json"}) as r:
+            if r.status_code in RETRYABLE_STATUS:
+                raise RuntimeError(f"pollinations HTTP {r.status_code}")
+            r.raise_for_status()
+            for raw_line in r.iter_lines():
+                line = (raw_line if isinstance(raw_line, str)
+                        else raw_line.decode("utf-8", "replace")).strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except Exception:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    content_parts.append(piece)
+                    try:
+                        on_token(piece)
+                    except Exception:
+                        pass  # never let the UI callback break the stream
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0)
+                    entry = tool_calls.setdefault(
+                        idx, {"id": "", "type": "function",
+                              "function": {"name": "", "arguments": ""}})
+                    if tc.get("id"):
+                        entry["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        entry["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        entry["function"]["arguments"] += fn["arguments"]
+    if not content_parts and not tool_calls:
+        raise RuntimeError("pollinations: stream ended with no content")
+    msg: dict = {"content": "".join(content_parts)}
+    if tool_calls:
+        msg["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    return msg
+
+
 def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
                       temperature: float = 0.7, timeout: int = 90,
                       tools: list[dict] | None = None,
                       retries: int = 4,
-                      progress: Optional[ProgressFn] = None) -> dict:
+                      progress: Optional[ProgressFn] = None,
+                      on_token: Optional[Callable[[str], None]] = None) -> dict:
     """Call Pollinations OpenAI-compatible endpoint with retry/backoff.
 
     Transient rate limits (402/429) and upstream blips are retried; only
     gives up after `retries` attempts. Returns the raw choice message dict.
+
+    on_token, when given, switches to SSE streaming: each content chunk is
+    forwarded immediately so the UI renders tokens as they arrive.
     """
     body: dict = {
         "model": POLLINATIONS_MODEL,
@@ -179,6 +248,8 @@ def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
         if progress:
             progress(f"Pollinations: attempt {attempt + 1}/{retries}…")
         try:
+            if on_token is not None:
+                return _pollinations_stream(body, timeout, on_token)
             with _client(timeout) as c:
                 r = c.post(POLLINATIONS_URL, json=body,
                            headers={"Content-Type": "application/json"})
@@ -342,8 +413,10 @@ def horde_chat(messages: list[dict], max_tokens: int = 1200,
 def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
          tools: list[dict] | None = None,
          progress: Optional[ProgressFn] = None,
-         preferred_model: str = "") -> tuple[str, str, list[dict], dict | None]:
-    """Route a chat turn. Returns (text, source, tool_calls, raw_message).
+         preferred_model: str = "",
+         on_token: Optional[Callable[[str], None]] = None,
+         ) -> tuple[str, str, list[dict], dict | None, bool]:
+    """Route a chat turn. Returns (text, source, tool_calls, raw_message, streamed).
 
     raw_message is the OpenAI-format assistant message (Pollinations) or None
     (Horde). Horde (Stheno/Heretic/Rocinante) is PRIMARY because those are
@@ -353,19 +426,31 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
     progress, when given, receives human-readable status strings as each leg
     runs (submission, queue waits, backoffs, leg transitions) so the UI can
     show live progress instead of a frozen "Thinking…".
+
+    on_token, when given, streams Pollinations tokens to the UI as they
+    arrive. streamed is True when the text was already pushed token-by-token,
+    so the caller must not re-emit the full text (it would duplicate).
     """
+    streamed = False
+
+    def _mark_streamed(chunk: str) -> None:
+        nonlocal streamed
+        streamed = True
+        if on_token:
+            on_token(chunk)
+
     # Primary: Horde (genuinely uncensored models)
     if progress:
         progress("Horde leg 1: contacting uncensored workers (Stheno/Heretic/Rocinante)…")
     try:
-        text = horde_chat(messages, max_tokens, temperature, timeout_s=180,
+        text = horde_chat(messages, max_tokens, temperature, timeout_s=120,
                            progress=progress, leg="Horde leg 1",
                            preferred_model=preferred_model)
         label = "horde"
         if looks_like_refusal(text):
             label = "horde (refused too)"
             raise _Refusal()
-        return text, label, [], None
+        return text, label, [], None, streamed
     except _Refusal:
         logger.info("horde refusal -> pollinations fallback")
         if progress:
@@ -375,10 +460,11 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         if progress:
             progress(f"Horde leg failed ({e}) — trying Pollinations…")
 
-    # Fallback 1: Pollinations (native tool calls)
+    # Fallback 1: Pollinations (native tool calls, streamed when possible)
     try:
         msg = pollinations_chat(messages, max_tokens, temperature, timeout=60,
-                                tools=tools, retries=3, progress=progress)
+                                tools=tools, retries=3, progress=progress,
+                                on_token=_mark_streamed if on_token else None)
         tool_calls = []
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function", {})
@@ -393,7 +479,7 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         if not tool_calls and looks_like_refusal(text):
             logger.info("pollinations refused; retrying horde once more")
             raise _Refusal()
-        return text, "pollinations", tool_calls, msg
+        return text, "pollinations", tool_calls, msg, streamed
     except _Refusal:
         logger.info("pollinations refusal -> final horde attempt")
         if progress:
@@ -411,7 +497,7 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         label = "horde (retry)"
         if looks_like_refusal(text):
             label = "horde (refused too)"
-        return text, label, [], None
+        return text, label, [], None, streamed
     except Exception as e:
         raise RuntimeError(f"all model legs failed (horde, pollinations, "
                            f"horde-retry; last: {e})") from e

@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Browser + screenshot tools (app/tools.py) need playwright and a chromium build.
+RUN python -m playwright install --with-deps chromium
+
 COPY app/ ./app/
 COPY static/ ./static/
 

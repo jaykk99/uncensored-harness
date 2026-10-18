@@ -494,7 +494,67 @@ const MODELS = [
     { id: "ref:qwen3-235b-a22b-instruct-2507", label: "Qwen3 235B", meta: "reference", off: true, disabled: true },
   ]},
 ];
-const HORDE_IDS = new Set(MODELS[0].items.filter(m => !m.fallback).map(m => m.id));
+let HORDE_IDS = new Set();
+function rebuildHordeIds() {
+  HORDE_IDS = new Set();
+  MODELS.forEach(g => g.items.forEach(m => {
+    const id = m.id || "";
+    if (id.startsWith("horde:") || (!id.includes(":") && !m.fallback && !m.disabled && !m.needsKey) || HORDE_LEGACY.has(id)) HORDE_IDS.add(id);
+  }));
+}
+// Bare Horde ids from before the provider-prefixed catalog (back-compat).
+const HORDE_LEGACY = new Set([
+  "koboldcpp/L3-8B-Stheno-v3.2",
+  "koboldcpp/Rocinante-X-12B-v1",
+  "koboldcpp/gemma-4-31B-it-heretic",
+  "koboldcpp/Gemma-4-E4B-it-Ultra-Uncensored-Heretic",
+  "koboldcpp/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q4_K_M",
+]);
+rebuildHordeIds();
+
+/* Fetch the live server model catalog (/api/models) so the picker shows
+   every wired provider model with real key status. Falls back to the
+   hardcoded MODELS above if the fetch fails. */
+async function loadServerModels() {
+  try {
+    const r = await fetch("/api/models?access_code=" + encodeURIComponent(AC));
+    if (!r.ok) return;
+    const data = await r.json();
+    const groups = (data.groups || []).map(g => {
+      const anyLive = g.items.some(m => m.live);
+      const suffix = g.keyless ? "" : (anyLive ? "" : " - needs API key");
+      return {
+        group: g.company + suffix,
+        items: g.items.map(m => ({
+          id: m.id,
+          label: m.label,
+          meta: (m.uncensored ? "uncensored" : m.company) + (m.live ? "" : " - needs key"),
+          live: !!m.live,
+          needsKey: !m.live && !m.keyless,
+        })),
+      };
+    }).filter(g => g.items.length);
+    if (!groups.length) return;
+    MODELS.length = 0;
+    groups.forEach(g => MODELS.push(g));
+    rebuildHordeIds();
+    const all = MODELS.flatMap(g => g.items);
+    if (!all.some(m => m.id === selModel.id)) {
+      selModel = all.find(m => m.live) || all[0];
+      localStorage.setItem("harness_model", JSON.stringify(selModel));
+    }
+    renderPicker();
+  } catch (e) { /* keep hardcoded fallback */ }
+}
+
+/* Model id to send with a chat turn. Horde ids go bare (preferred_model);
+   provider-prefixed ids ("kilo:...") route the omni chain. */
+function modelParamFor(m) {
+  if (!m || !m.id) return "";
+  if (m.id.startsWith("horde:")) return m.id.slice(6);
+  if (m.id.includes(":")) return m.id;
+  return HORDE_IDS.has(m.id) ? m.id : "";
+}
 
 /* ================= state ================= */
 let AC = localStorage.getItem("harness_ac") || "";
@@ -530,6 +590,7 @@ async function tryUnlock(code, isAuto) {
       localStorage.setItem("harness_ac", code);
       gate.classList.add("hidden");
       loadThreads();
+      loadServerModels();
       return true;
     }
     if (r.status === 401) {
@@ -582,8 +643,8 @@ function renderPicker() {
   });
   const note = $("modelnote");
   if (selModel.needsKey) {
-    note.innerHTML = "Venice model <b>" + esc(selModel.label) +
-      "</b> needs an API key and is not wired up yet. Horde will answer for now.";
+    note.innerHTML = "Model <b>" + esc(selModel.label) +
+      "</b> needs its API key set on the server. It will be skipped until then.";
     note.classList.add("visible");
   } else { note.classList.remove("visible"); }
 }
@@ -592,7 +653,7 @@ function selectModel(m) {
   localStorage.setItem("harness_model", JSON.stringify(m));
   renderPicker();
   modelmenu.classList.remove("open");
-  if (m.needsKey) toast("Venice needs an API key. Horde answers until then.", true);
+  if (m.needsKey) toast("That model needs its API key. It will be skipped.", true);
 }
 modelbtn.onclick = e => { e.stopPropagation(); modelmenu.classList.toggle("open"); };
 document.addEventListener("click", e => {
@@ -910,7 +971,7 @@ async function send() {
   const raw = msgEl.value.trim();
   if ((!raw && attachments.length === 0) || sending) return;
   const { text, images } = await buildMessage(raw);
-  const useModel = HORDE_IDS.has(selModel.id) ? selModel.id : "";
+  const useModel = modelParamFor(selModel);
   sending = true;
   sendBtn.disabled = true;
   sendBtn.style.display = "none";

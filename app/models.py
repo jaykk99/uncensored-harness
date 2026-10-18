@@ -418,10 +418,12 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
          ) -> tuple[str, str, list[dict], dict | None, bool]:
     """Route a chat turn. Returns (text, source, tool_calls, raw_message, streamed).
 
-    raw_message is the OpenAI-format assistant message (Pollinations) or None
-    (Horde). Horde (Stheno/Heretic/Rocinante) is PRIMARY because those are
-    genuinely uncensored. Pollinations (gpt-oss-20b) is the fallback for its
-    native tool calls. A final Horde retry closes out the legs.
+    raw_message is the OpenAI-format assistant message (Pollinations/omni) or
+    None (Horde). Horde (Stheno/Heretic/Rocinante) is PRIMARY because those
+    are genuinely uncensored. The omni chain (keyless LLM7/Kilo, then keyed
+    providers with keys set) runs next so a stalled Horde queue never hangs
+    the turn. Pollinations (gpt-oss-20b) follows for its native tool calls.
+    A final Horde retry closes out the legs.
 
     progress, when given, receives human-readable status strings as each leg
     runs (submission, queue waits, backoffs, leg transitions) so the UI can
@@ -452,29 +454,34 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
             raise _Refusal()
         return text, label, [], None, streamed
     except _Refusal:
-        logger.info("horde refusal -> pollinations fallback")
+        logger.info("horde refusal -> omni chain")
         if progress:
-            progress("Horde refused — trying Pollinations…")
+            progress("Horde refused — trying omni providers…")
     except Exception as e:
-        logger.warning("horde failed, falling back to pollinations: %s", e)
+        logger.warning("horde failed, falling back to omni chain: %s", e)
         if progress:
-            progress(f"Horde leg failed ({e}) — trying Pollinations…")
+            progress(f"Horde leg failed ({e}) — trying omni providers…")
+
+    # Omni chain: keyless (LLM7, Kilo) + keyed providers with keys set.
+    # Each gets a short timeout; failures fall through to the next.
+    try:
+        omni = _omni_leg(messages, max_tokens, temperature, tools,
+                         progress, preferred_model)
+    except Exception as e:
+        logger.warning("omni leg errored: %s", e)
+        omni = None
+    if omni is not None:
+        text, label, tool_calls, raw_msg = omni
+        return text, label, tool_calls, raw_msg, streamed
+    if progress:
+        progress("Omni providers exhausted — trying Pollinations…")
 
     # Fallback 1: Pollinations (native tool calls, streamed when possible)
     try:
         msg = pollinations_chat(messages, max_tokens, temperature, timeout=60,
                                 tools=tools, retries=3, progress=progress,
                                 on_token=_mark_streamed if on_token else None)
-        tool_calls = []
-        for tc in msg.get("tool_calls") or []:
-            fn = tc.get("function", {})
-            import json as _json
-            try:
-                args = _json.loads(fn.get("arguments") or "{}")
-            except Exception:
-                args = {}
-            tool_calls.append({"id": tc.get("id") or f"call_{len(tool_calls)}",
-                               "name": fn.get("name", ""), "args": args})
+        tool_calls = _parse_tool_calls(msg)
         text = msg.get("content") or ""
         if not tool_calls and looks_like_refusal(text):
             logger.info("pollinations refused; retrying horde once more")
@@ -505,6 +512,54 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
 
 class _Refusal(Exception):
     pass
+
+
+def _parse_tool_calls(msg: dict) -> list[dict]:
+    """Parse OpenAI-format tool_calls from a raw assistant message."""
+    tool_calls = []
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function", {})
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except Exception:
+            args = {}
+        tool_calls.append({"id": tc.get("id") or f"call_{len(tool_calls)}",
+                           "name": fn.get("name", ""), "args": args})
+    return tool_calls
+
+
+def _omni_leg(messages: list[dict], max_tokens: int, temperature: float,
+              tools: list[dict] | None,
+              progress: Optional[ProgressFn],
+              preferred_model: str,
+              ) -> tuple[str, str, list[dict], dict | None] | None:
+    """Try the omni provider chain (keyless + keyed). Returns the chat tuple
+    (text, label, tool_calls, raw_msg) on success, None if every provider
+    failed. Each provider gets a short timeout so one slow provider can't
+    stall the turn; failures move to the next provider."""
+    from . import providers as providers_mod  # lazy: providers imports from here
+    chain = providers_mod.omni_chain(preferred_model)
+    if not chain:
+        return None
+    for p, model in chain:
+        try:
+            msg = providers_mod.call_provider(
+                p, model, messages, max_tokens, temperature,
+                timeout=45, tools=tools, on_token=None, progress=progress)
+        except Exception as e:
+            logger.warning("omni %s/%s failed: %s", p.name, model, e)
+            if progress:
+                progress(f"{p.label} failed — trying next provider…")
+            continue
+        tool_calls = _parse_tool_calls(msg)
+        text = (msg.get("content") or "").strip()
+        if not tool_calls and looks_like_refusal(text):
+            logger.info("omni %s/%s refused; trying next", p.name, model)
+            continue
+        if not text and not tool_calls:
+            continue
+        return text, f"{p.name}/{model}", tool_calls, msg
+    return None
 
 
 def self_test(timeout_s: int = 120) -> dict:

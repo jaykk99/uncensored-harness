@@ -91,6 +91,24 @@ def threads(access_code: str = ""):
     return {"threads": memory.list_threads()}
 
 
+@app.get("/api/models")
+def api_models(access_code: str = ""):
+    _check_access(access_code)
+    from . import providers as providers_mod
+    models = providers_mod.list_models()
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    for m in models:
+        g = m["provider"]
+        if g not in groups:
+            groups[g] = {"provider": g, "company": m["company"],
+                         "keyless": m["keyless"], "items": []}
+            order.append(g)
+        groups[g]["items"].append(m)
+    return {"groups": [groups[g] for g in order],
+            "count": len(models)}
+
+
 @app.get("/")
 def index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))

@@ -177,8 +177,9 @@
     font-family: ui-monospace, Menlo, monospace; font-size: 13px; white-space: pre-wrap;
     max-height: 300px; overflow-y: auto; background: #0b0b0e; }
   .thinking { display: flex; align-items: center; gap: 10px; color: var(--dim);
-    font-size: 14px; padding: 8px 0; }
-  .tdots { display: inline-flex; gap: 4px; }
+    font-size: 14px; padding: 8px 0; cursor: pointer; border-radius: 8px; }
+  .thinking:hover { background: rgba(255,255,255,0.04); }
+  .thinking .tdots { display: inline-flex; gap: 4px; flex-shrink: 0; }
   .tdots span { width: 7px; height: 7px; border-radius: 50%; background: var(--dim);
     animation: blink 1.2s infinite; }
   .tdots span:nth-child(2) { animation-delay: .2s; }
@@ -186,6 +187,12 @@
   @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
   .thinking .ttext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 70%; }
   .thinking .telapsed { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 13px; }
+  .thinking .texpand { margin-left: auto; font-size: 12px; color: var(--dim); flex-shrink: 0; }
+  .thinklog { display: none; font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+    color: var(--dim); white-space: pre-wrap; max-height: 220px; overflow-y: auto;
+    border-left: 2px solid var(--border); padding: 8px 12px; margin: 4px 0 8px 14px; }
+  .thinking.open + .thinklog { display: block; }
+  .thinking.open .texpand { transform: rotate(180deg); }
   .toolcall { border: 1px solid var(--border); border-radius: 12px; margin: 10px 0;
     background: var(--panel); font-size: 13px; overflow: hidden; }
   .toolcall summary { padding: 10px 14px; cursor: pointer; color: var(--dim); list-style: none; }
@@ -343,7 +350,7 @@
     <div class="gdot"></div>
     <h2>Harness</h2>
     <p>Enter your access code to continue.</p>
-    <input id="gatecode" type="password" placeholder="access code" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <input id="gatecode" type="password" placeholder="access code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" inputmode="text">
     <button id="gatego">Unlock</button>
     <div id="gateerr"></div>
   </div>
@@ -514,7 +521,7 @@ function toast(msg, amber) {
 
 /* ================= access gate ================= */
 const gate = $("gate"), gatecode = $("gatecode"), gateerr = $("gateerr");
-async function tryUnlock(code) {
+async function tryUnlock(code, isAuto) {
   gateerr.textContent = "";
   try {
     const r = await fetch("/api/threads?access_code=" + encodeURIComponent(code));
@@ -525,18 +532,31 @@ async function tryUnlock(code) {
       loadThreads();
       return true;
     }
-    gateerr.textContent = r.status === 401 ? "Wrong code, try again." : "Server error " + r.status;
+    if (r.status === 401) {
+      gateerr.textContent = "Wrong code, try again.";
+      // Auto-unlock used a stale saved code. Clear it so it stops failing,
+      // then focus the input so the user can type the right one.
+      if (isAuto) {
+        localStorage.removeItem("harness_ac");
+        AC = "";
+      }
+    } else {
+      gateerr.textContent = "Server error " + r.status;
+    }
   } catch (e) { gateerr.textContent = "Could not reach server."; }
+  // Always leave the input focused and ready after any failed attempt.
+  gatecode.value = "";
+  setTimeout(() => gatecode.focus(), 50);
   return false;
 }
-$("gatego").onclick = () => tryUnlock(gatecode.value.trim());
-gatecode.addEventListener("keydown", e => { if (e.key === "Enter") tryUnlock(gatecode.value.trim()); });
+$("gatego").onclick = () => { const c = gatecode.value.trim(); if (c) tryUnlock(c); };
+gatecode.addEventListener("keydown", e => { if (e.key === "Enter") { const c = gatecode.value.trim(); if (c) tryUnlock(c); } });
 function logout() {
   AC = ""; localStorage.removeItem("harness_ac");
   gate.classList.remove("hidden"); gatecode.value = ""; gatecode.focus();
 }
 $("logout-btn").onclick = logout;
-if (AC) { tryUnlock(AC); } else { gatecode.focus(); }
+if (AC) { tryUnlock(AC, true); } else { gatecode.focus(); }
 
 /* ================= model picker ================= */
 const modelbtn = $("modelbtn"), modelmenu = $("modelmenu");
@@ -742,12 +762,28 @@ function setThinking(bubble, text) {
   if (!t) {
     t = document.createElement("div");
     t.className = "thinking";
+    t.title = "Tap to see full thinking log";
     t.innerHTML = '<div class="tdots"><span></span><span></span><span></span></div>' +
-      '<span class="ttext"></span><span class="telapsed"></span>';
+      '<span class="ttext"></span><span class="telapsed"></span><span class="texpand">&#9660;</span>';
+    const log = document.createElement("div");
+    log.className = "thinklog";
+    // Tap the header to expand or collapse the full thinking log.
+    t.addEventListener("click", () => t.classList.toggle("open"));
     bubble.appendChild(t);
+    bubble.appendChild(log);
     startThinkTimer(bubble);
   }
   t.querySelector(".ttext").textContent = noDash(text || "Thinking...");
+  // Accumulate every thinking update into the expandable log.
+  const log = bubble.querySelector(".thinklog");
+  if (log && text) {
+    const clean = noDash(text);
+    const lines = log.textContent.split("\n");
+    if (lines[lines.length - 1] !== clean) {
+      log.textContent += (log.textContent ? "\n" : "") + clean;
+      log.scrollTop = log.scrollHeight;
+    }
+  }
   chat.scrollTop = chat.scrollHeight;
 }
 function clearThinking(bubble) {
@@ -901,6 +937,7 @@ async function send() {
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
+    let gotTerminal = false;
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -918,12 +955,20 @@ async function send() {
         else if (ev.type === "tool") appendTool(bubble, ev.name, ev.args);
         else if (ev.type === "tool_result") appendToolResult(bubble, ev.name, ev.output);
         else if (ev.type === "shot") appendShot(bubble, ev.shot, ev.caption);
-        else if (ev.type === "error") appendError(bubble, ev.error);
+        else if (ev.type === "error") { gotTerminal = true; appendError(bubble, ev.error); }
         else if (ev.type === "done") {
+          gotTerminal = true;
           clearThinking(bubble);
           $("routeinfo").innerHTML = "last route: <b>" + esc(ev.model || "?") + "</b>";
         }
       }
+    }
+    // The stream ended without a done or error event. The connection was
+    // killed mid-turn (proxy timeout, network drop). Say so plainly instead
+    // of leaving a frozen thinking spinner.
+    if (!gotTerminal) {
+      clearThinking(bubble);
+      appendError(bubble, "Connection dropped before the model finished. Try sending again.");
     }
   } catch (e) {
     if (e.name === "AbortError") appendError(bubble, "Stopped.");

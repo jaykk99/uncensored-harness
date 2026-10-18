@@ -135,13 +135,30 @@ async def run_turn(history: list[dict], emit, model: str = "",
         except Exception:
             pass
 
+    def _on_token(chunk: str) -> None:
+        # Forward streamed tokens to the UI immediately (same thread-safe
+        # bridge as progress). The UI appends them as they arrive.
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                emit({"type": "token", "text": chunk}), loop)
+
+            def _done(f):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+
+            fut.add_done_callback(_done)
+        except Exception:
+            pass
+
     final_text = ""
     source = "?"
 
     for _ in range(MAX_ITERS):
-        text, source, native_calls, raw_msg = await asyncio.to_thread(
-            models.chat, messages, 1500, 0.7, T.openai_tools(),
-            progress=_progress, preferred_model=model)
+        text, source, native_calls, raw_msg, streamed = await asyncio.to_thread(
+            models.chat, messages, 1200, 0.7, T.openai_tools(),
+            progress=_progress, preferred_model=model, on_token=_on_token)
         clean, fenced_calls = _parse_fenced_calls(text)
         calls = native_calls or fenced_calls
 
@@ -154,7 +171,10 @@ async def run_turn(history: list[dict], emit, model: str = "",
             messages.append(_synth_assistant_msg(clean, calls))
 
         if clean and not calls:
-            await emit({"type": "text", "text": clean})
+            # Skip the full-text emit when tokens were already streamed;
+            # re-emitting would duplicate the visible reply.
+            if not streamed:
+                await emit({"type": "text", "text": clean})
             final_text += (("\n" if final_text else "") + clean)
 
         if not calls:

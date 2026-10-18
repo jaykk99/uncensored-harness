@@ -166,11 +166,32 @@ async def chat(req: ChatRequest):
                 await queue.put(None)
 
         task = asyncio.create_task(run_agent())
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
-                break
-            yield chunk
+
+        # Keepalive: some proxies (Railway included) kill SSE streams that go
+        # quiet. Send a comment ping every 15s so the connection stays alive
+        # through long model waits. Clients ignore SSE comments.
+        stop_ping = asyncio.Event()
+
+        async def pinger():
+            try:
+                while not stop_ping.is_set():
+                    await asyncio.sleep(15)
+                    if stop_ping.is_set():
+                        break
+                    await queue.put(": ping\n\n")
+            except asyncio.CancelledError:
+                pass
+
+        ping_task = asyncio.create_task(pinger())
+        try:
+            while True:
+                chunk = await queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+        finally:
+            stop_ping.set()
+            ping_task.cancel()
         await task
 
     return StreamingResponse(stream(), media_type="text/event-stream")

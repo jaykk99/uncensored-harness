@@ -7,3 +7,5 @@ services:
     envVars:
       - key: HARNESS_WORKDIR
         value: /opt/render/project/src/work
+      - key: HARNESS_ACCESS_CODE
+        sync: false

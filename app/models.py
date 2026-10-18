@@ -1,17 +1,19 @@
 """Verified uncensored model routing.
 
 Chain (never an RLHF-tuned refuser — no GPT, no Claude, no Gemini):
-  1. AI Horde (primary) — keyless, genuinely uncensored workers: Stheno,
-     Heretic, Rocinante lineages. Anonymous submits can transiently
-     403/429; retried with backoff across both API endpoints.
-  2. Pollinations (fallback) — keyless, OpenAI-compatible, gpt-oss-20b
-     (open weights), kept for its native tool-call support. Anonymous tier
-     is rate-limited: transient 402/429s are normal under load, so calls
-     are paced and retried with backoff. Refusals are detected and the
-     turn retries Horde.
+  1. RACE (primary) — Horde (45s cap: Stheno, Heretic, Rocinante workers,
+     genuinely uncensored) runs in parallel against the fast keyless
+     providers (Kilo Gateway, LLM7, Pollinations). Whichever answers first
+     wins; the losers are cancelled. This fixes Horde's unpredictable
+     queue times: a slow Horde queue no longer blocks the turn when a
+     fast provider is ready.
+  2. Omni chain (sequential fallback) — keyed providers with keys set
+     (DeepInfra/Together Dolphin, OpenRouter Hermes, Groq, Cerebras...).
+  3. Pollinations (streamed) — native tool-call support.
+  4. Horde retry (final) — a worker may have come online meanwhile.
 
-chat() tries Horde first, falls back to Pollinations on any failure, and
-does a final Horde retry if Pollinations refuses or fails.
+chat() races first, falls back sequentially on race failure, and raises a
+clear error if every leg fails (never hangs).
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import logging
 import os
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
 import httpx
@@ -410,6 +413,103 @@ def horde_chat(messages: list[dict], max_tokens: int = 1200,
                            preferred_model=preferred_model)
 
 
+def _race_first_response(messages: list[dict], max_tokens: int,
+                         temperature: float, tools: list[dict] | None,
+                         progress: Optional[ProgressFn],
+                         preferred_model: str,
+                         ) -> tuple[str, str, list[dict], dict | None]:
+    """Race Horde (45s) against the fast keyless providers in parallel.
+
+    Horde is a volunteer worker network with unpredictable queue times.
+    Instead of blocking on it, we run Horde, Kilo Gateway, LLM7, and
+    Pollinations at the same time and take whichever returns a valid
+    non-refusal response first. The losers are cancelled.
+
+    Returns (text, source, tool_calls, raw_msg). Raises RuntimeError if
+    every leg fails. No token streaming during the race: if Pollinations
+    streamed partial tokens and Horde won instead, the UI would show a
+    confusing mix. The winner's full text is returned instead.
+    """
+    from . import providers as providers_mod  # lazy: providers imports from here
+
+    def _horde_race():
+        text = horde_chat(messages, max_tokens, temperature, timeout_s=45,
+                          progress=None, leg="Horde",
+                          preferred_model=preferred_model)
+        if looks_like_refusal(text):
+            raise _Refusal("horde refused")
+        return ("horde", text, [], None)
+
+    def _fast_provider_race(provider_name: str, max_models: int = 2):
+        """Try a keyless provider's first models; return the first that works."""
+        p = providers_mod.get_provider(provider_name)
+        if p is None:
+            raise RuntimeError(f"unknown provider {provider_name}")
+        last_err: Exception | None = None
+        for model in p.models[:max_models]:
+            try:
+                msg = providers_mod.call_provider(
+                    p, model, messages, max_tokens, temperature,
+                    timeout=30, tools=tools, on_token=None, progress=None)
+            except Exception as e:
+                last_err = e
+                continue
+            tool_calls = _parse_tool_calls(msg)
+            text = (msg.get("content") or "").strip()
+            if not tool_calls and looks_like_refusal(text):
+                last_err = RuntimeError("refusal")
+                continue
+            if not text and not tool_calls:
+                last_err = RuntimeError("empty response")
+                continue
+            return (f"{provider_name}/{model}", text, tool_calls, msg)
+        raise RuntimeError(f"{provider_name} failed (last: {last_err})")
+
+    def _pollinations_race():
+        msg = pollinations_chat(messages, max_tokens, temperature, timeout=45,
+                                tools=tools, retries=2, progress=None,
+                                on_token=None)
+        tool_calls = _parse_tool_calls(msg)
+        text = msg.get("content") or ""
+        if not tool_calls and looks_like_refusal(text):
+            raise _Refusal("pollinations refused")
+        return ("pollinations", text, tool_calls, msg)
+
+    legs = [
+        ("horde", _horde_race),
+        ("kilo", lambda: _fast_provider_race("kilo")),
+        ("llm7", lambda: _fast_provider_race("llm7")),
+        ("pollinations", _pollinations_race),
+    ]
+
+    if progress:
+        progress("Trying fast providers alongside Horde, taking the first answer…")
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        future_to_name = {ex.submit(fn): name for name, fn in legs}
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                result = future.result()
+            except _Refusal:
+                logger.info("race: %s refused, waiting for the others", name)
+                continue
+            except Exception as e:
+                logger.warning("race: %s failed: %s", name, e)
+                continue
+            # Winner: cancel the losers so they stop burning time.
+            for f, n in future_to_name.items():
+                if f is not future:
+                    f.cancel()
+            if progress:
+                progress(f"{result[0]} answered first, using it.")
+            return result
+
+    raise RuntimeError(
+        "All providers failed: Horde, Kilo, LLM7, and Pollinations "
+        "all errored. Check your network connection and try again.")
+
+
 def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
          tools: list[dict] | None = None,
          progress: Optional[ProgressFn] = None,
@@ -419,11 +519,19 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
     """Route a chat turn. Returns (text, source, tool_calls, raw_message, streamed).
 
     raw_message is the OpenAI-format assistant message (Pollinations/omni) or
-    None (Horde). Horde (Stheno/Heretic/Rocinante) is PRIMARY because those
-    are genuinely uncensored. The omni chain (keyless LLM7/Kilo, then keyed
-    providers with keys set) runs next so a stalled Horde queue never hangs
-    the turn. Pollinations (gpt-oss-20b) follows for its native tool calls.
-    A final Horde retry closes out the legs.
+    None (Horde).
+
+    Phase 1 (race): Horde (45s cap, Stheno/Heretic/Rocinante) runs in
+    parallel against the fast keyless providers (Kilo, LLM7, Pollinations).
+    Whichever answers first with a valid non-refusal response wins; the
+    losers are cancelled. This fixes Horde's unpredictable queue times:
+    the turn no longer blocks on a slow Horde queue when a fast provider
+    is ready.
+
+    Phase 2 (sequential fallback): if the race fails, the keyed omni
+    providers (keys set) are tried, then Pollinations with streaming, then
+    a final Horde retry. If everything fails, a clear RuntimeError is
+    raised instead of hanging.
 
     progress, when given, receives human-readable status strings as each leg
     runs (submission, queue waits, backoffs, leg transitions) so the UI can
@@ -441,26 +549,23 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         if on_token:
             on_token(chunk)
 
-    # Primary: Horde (genuinely uncensored models)
-    if progress:
-        progress("Horde leg 1: contacting uncensored workers (Stheno/Heretic/Rocinante)…")
+    # Phase 1: RACE. Horde's volunteer workers have unpredictable queue
+    # times, so instead of blocking on Horde we run Horde (45s cap) against
+    # the fast keyless providers (Kilo, LLM7, Pollinations) in parallel and
+    # take whichever answers first. The losers are cancelled.
     try:
-        text = horde_chat(messages, max_tokens, temperature, timeout_s=120,
-                           progress=progress, leg="Horde leg 1",
-                           preferred_model=preferred_model)
-        label = "horde"
-        if looks_like_refusal(text):
-            label = "horde (refused too)"
-            raise _Refusal()
-        return text, label, [], None, streamed
-    except _Refusal:
-        logger.info("horde refusal -> omni chain")
-        if progress:
-            progress("Horde refused — trying omni providers…")
+        text, source, tool_calls, raw_msg = _race_first_response(
+            messages, max_tokens, temperature, tools, progress, preferred_model)
+        return text, source, tool_calls, raw_msg, streamed
     except Exception as e:
-        logger.warning("horde failed, falling back to omni chain: %s", e)
+        logger.warning("race failed, falling back to sequential legs: %s", e)
         if progress:
-            progress(f"Horde leg failed ({e}) — trying omni providers…")
+            progress("Fast race failed, trying the full fallback chain…")
+
+    # Phase 2: sequential fallback. The race already tried Horde (45s),
+    # Kilo, LLM7, and Pollinations, so here we try the keyed omni
+    # providers (only those with keys set), then Pollinations once more
+    # with streaming, then a final Horde retry.
 
     # Omni chain: keyless (LLM7, Kilo) + keyed providers with keys set.
     # Each gets a short timeout; failures fall through to the next.

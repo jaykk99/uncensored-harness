@@ -325,6 +325,45 @@
   #gateerr { color: var(--red); font-size: 13px; margin-top: 10px; min-height: 18px; }
 
   /* ---------- mobile ---------- */
+  /* ---------- system view ---------- */
+  #sysview { flex: 1; display: none; flex-direction: column; min-height: 0; overflow-y: auto; padding: 24px 18px; }
+  #sysview.visible { display: flex; }
+  #syspanel { max-width: 860px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  #syspanel h2 { font-size: 20px; font-weight: 700; }
+  #syspanel .sub { color: var(--dim); font-size: 13px; margin-top: -12px; }
+  .syscard { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px; }
+  .syscard h3 { font-size: 15px; margin-bottom: 4px; }
+  .syscard .note { font-size: 12px; color: var(--dim); margin-bottom: 12px; line-height: 1.5; }
+  .intgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .intcard { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .intcard .iname { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .intdot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .intdot.on { background: var(--green); box-shadow: 0 0 6px rgba(76,175,125,.7); }
+  .intdot.off { background: var(--dim); }
+  .intcard .istat { font-size: 12px; color: var(--dim); line-height: 1.5; }
+  .intcard .istat b { color: var(--text); font-weight: 600; }
+  .intcard code { font-size: 11px; background: var(--code); padding: 1px 5px; border-radius: 5px; color: var(--accent); }
+  .prow { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--border); font-size: 13px; }
+  .prow:first-of-type { border-top: 0; }
+  .prow .pname { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prow .pmeta { color: var(--dim); font-size: 12px; }
+  .pbtn { background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 6px 14px; font-size: 12px; cursor: pointer; }
+  .pbtn:hover:not(:disabled) { border-color: var(--accent); }
+  .pbtn:disabled { opacity: .5; cursor: default; }
+  .presults { margin: 4px 0 8px 0; font-size: 12px; }
+  .presult { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; border-top: 1px dashed var(--border); }
+  .presult .mid { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+  .pass { color: var(--green); font-weight: 700; }
+  .fail { color: var(--red); font-weight: 700; }
+  .rtable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .rtable th { text-align: left; color: var(--dim); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .rtable td { padding: 7px 8px; border-bottom: 1px solid var(--border); }
+  .rtable tr:last-child td { border-bottom: 0; }
+  .rbar { height: 6px; border-radius: 3px; background: var(--panel2); overflow: hidden; min-width: 80px; }
+  .rbar > div { height: 100%; background: var(--green); border-radius: 3px; }
+  .sysempty { color: var(--dim); font-size: 13px; padding: 8px 0; }
+
   @media (max-width: 820px) {
     #menu-btn { display: block; }
     #sidebar { position: fixed; top: 0; left: 0; bottom: 0; transform: translateX(-102%);
@@ -372,6 +411,7 @@
   <div class="modetabs">
     <button class="modetab active" id="mode-chat">Chat</button>
     <button class="modetab" id="mode-image">Image</button>
+    <button class="modetab" id="mode-sys">System</button>
   </div>
   <button class="iconbtn" id="termbtn" title="Terminal">&gt;_</button>
   <button class="iconbtn" id="newchatbtn" title="New chat">+</button>
@@ -446,6 +486,28 @@
       <div id="termin">
         <input id="termcmd" placeholder="type a command..." autocomplete="off">
         <button id="termgo" class="cbtn" style="padding:10px 18px">Run</button>
+      </div>
+    </div>
+
+    <div id="sysview">
+      <div id="syspanel">
+        <h2>System</h2>
+        <div class="sub">Integrations, provider probes, and routing health. Nothing here phones home beyond the providers you connect.</div>
+        <div class="syscard">
+          <h3>Integrations</h3>
+          <div class="note">Native direct APIs — no middleman. Missing credentials are set as server env vars (Render dashboard &gt; Environment).</div>
+          <div class="intgrid" id="intgrid"><div class="sysempty">loading...</div></div>
+        </div>
+        <div class="syscard">
+          <h3>Uncensored probe suite</h3>
+          <div class="note">Runs the refusal probes against one provider's live models and scores each model. Slow (each model answers 3 probes) — probe one provider at a time. A model counts as uncensored only when every probe passes.</div>
+          <div id="probelist"><div class="sysempty">loading providers...</div></div>
+        </div>
+        <div class="syscard">
+          <h3>Router health</h3>
+          <div class="note">Every model leg's real outcomes — attempts, success rate, refusals, errors, avg latency. Recorded live as you chat.</div>
+          <div id="routerhealth"><div class="sysempty">loading...</div></div>
+        </div>
       </div>
     </div>
   </div>
@@ -673,21 +735,25 @@ webtoggle.onclick = () => {
 renderWeb();
 
 /* ================= mode tabs / views ================= */
-const chatview = $("chatview"), imageview = $("imageview"), termview = $("termview");
-const modeChat = $("mode-chat"), modeImage = $("mode-image"), termbtn = $("termbtn");
+const chatview = $("chatview"), imageview = $("imageview"), termview = $("termview"), sysview = $("sysview");
+const modeChat = $("mode-chat"), modeImage = $("mode-image"), modeSys = $("mode-sys"), termbtn = $("termbtn");
 let curView = "chat";
 function showView(v) {
   curView = v;
   chatview.style.display = v === "chat" ? "flex" : "none";
   imageview.classList.toggle("visible", v === "image");
   termview.classList.toggle("visible", v === "term");
+  sysview.classList.toggle("visible", v === "sys");
   modeChat.classList.toggle("active", v === "chat");
   modeImage.classList.toggle("active", v === "image");
+  modeSys.classList.toggle("active", v === "sys");
   termbtn.classList.toggle("active", v === "term");
+  if (v === "sys") loadSysView();
   closeDrawer();
 }
 modeChat.onclick = () => showView("chat");
 modeImage.onclick = () => showView("image");
+modeSys.onclick = () => showView("sys");
 termbtn.onclick = () => showView(curView === "term" ? "chat" : "term");
 $("newchatbtn").onclick = () => { newChat(); showView("chat"); };
 function newChat() { threadId = ""; $("chat").querySelectorAll(".msg").forEach(e => e.remove()); $("welcome").style.display = ""; }
@@ -1178,8 +1244,94 @@ async function termRun() {
 $("termgo").onclick = termRun;
 termcmd.addEventListener("keydown", e => { if (e.key === "Enter") termRun(); });
 
-/* ================= self-test ================= */
-$("selftest-btn").onclick = async () => {
+/* ================= system view ================= */
+const INT_META = {
+  github: { label: "GitHub", env: "GITHUB_TOKEN", about: "repos, issues, PRs, Actions dispatch" },
+  gitlab: { label: "GitLab", env: "GITLAB_TOKEN", about: "projects, issues, pipelines" },
+  gmail: { label: "Gmail", env: "GOOGLE_OAUTH_CLIENT_ID + SECRET + GOOGLE_REFRESH_TOKEN", about: "send (approval-gated), search, read — needs Jay's one-time Google connect" },
+  vercel: { label: "Vercel", env: "VERCEL_TOKEN", about: "projects, deployments, redeploy, env vars" },
+  fal: { label: "Fal.ai", env: "FAL_KEY", about: "image generation (queue API)" },
+};
+
+async function loadSysView() {
+  loadIntegrations();
+  loadProbeList();
+  loadRouterHealth();
+}
+
+async function loadIntegrations() {
+  const grid = $("intgrid");
+  try {
+    const d = await (await fetch("/api/health")).json();
+    const ints = d.integrations || {};
+    let h = "";
+    for (const [key, meta] of Object.entries(INT_META)) {
+      const on = !!ints[key];
+      h += `<div class="intcard"><div class="iname"><span class="intdot ${on ? "on" : "off"}"></span>${esc(meta.label)}</div>` +
+        `<div class="istat">${on ? "<b>connected</b> — " + esc(meta.about)
+          : "not connected — set <code>" + esc(meta.env) + "</code><br>" + esc(meta.about)}</div></div>`;
+    }
+    if (d.composio) h += `<div class="intcard"><div class="iname"><span class="intdot off"></span>Composio</div>` +
+      `<div class="istat">${esc(d.composio)}</div></div>`;
+    grid.innerHTML = h;
+  } catch (e) { grid.innerHTML = `<div class="sysempty">failed to load: ${esc(String(e))}</div>`; }
+}
+
+async function loadProbeList() {
+  const box = $("probelist");
+  try {
+    const d = await (await fetch("/api/models?access_code=" + encodeURIComponent(AC))).json();
+    const groups = (d.groups || []).filter(g => g.items.some(m => m.live));
+    if (!groups.length) { box.innerHTML = `<div class="sysempty">no live providers</div>`; return; }
+    box.innerHTML = "";
+    groups.forEach(g => {
+      const live = g.items.filter(m => m.live).length;
+      const row = document.createElement("div");
+      row.innerHTML = `<div class="prow"><span class="pname">${esc(g.company)} <span class="pmeta">${esc(g.provider)} · ${live} live model${live === 1 ? "" : "s"}</span></span>` +
+        `<button class="pbtn">Probe</button></div><div class="presults" style="display:none"></div>`;
+      const btn = row.querySelector(".pbtn"), res = row.querySelector(".presults");
+      btn.onclick = async () => {
+        btn.disabled = true; btn.textContent = "Probing...";
+        res.style.display = ""; res.innerHTML = `<div class="sysempty">running refusal probes against ${live} model(s) — this takes a while...</div>`;
+        try {
+          const r = await fetch("/api/probe?provider=" + encodeURIComponent(g.provider) +
+            "&access_code=" + encodeURIComponent(AC));
+          const rep = await r.json();
+          let h = `<div style="margin:6px 0"><b class="${rep.ok ? "pass" : "fail"}">${esc(rep.verdict)}</b></div>`;
+          (rep.results || []).forEach(m => {
+            const ok = m.passed === m.total;
+            h += `<div class="presult"><span class="${ok ? "pass" : "fail"}">${ok ? "PASS" : "FAIL"}</span>` +
+              `<span class="mid">${esc(m.model.split(":").slice(1).join(":"))}</span>` +
+              `<span class="pmeta">${m.passed}/${m.total}${m.error ? " — " + esc(m.error.slice(0, 80)) : ""}</span></div>`;
+          });
+          res.innerHTML = h;
+        } catch (e) { res.innerHTML = `<div class="sysempty">probe failed: ${esc(String(e))}</div>`; }
+        btn.disabled = false; btn.textContent = "Probe";
+      };
+      box.appendChild(row);
+    });
+  } catch (e) { box.innerHTML = `<div class="sysempty">failed to load: ${esc(String(e))}</div>`; }
+}
+
+async function loadRouterHealth() {
+  const box = $("routerhealth");
+  try {
+    const d = await (await fetch("/api/router-stats?access_code=" + encodeURIComponent(AC))).json();
+    const legs = d.legs || [];
+    if (!legs.length) { box.innerHTML = `<div class="sysempty">no turns recorded yet — chat once and the legs show up here.</div>`; return; }
+    let h = `<table class="rtable"><tr><th>Leg</th><th>Success</th><th></th><th>Refusals</th><th>Errors</th><th>Avg ms</th></tr>`;
+    legs.slice(0, 25).forEach(l => {
+      const pct = Math.round(l.success_rate * 100);
+      h += `<tr><td>${esc(l.provider)}<br><span style="color:var(--dim);font-size:11px">${esc(String(l.model).slice(0, 40))}</span></td>` +
+        `<td>${l.successes}/${l.attempts}</td>` +
+        `<td><div class="rbar"><div style="width:${pct}%"></div></div></td>` +
+        `<td>${l.refusals}</td><td>${l.errors}</td><td>${l.avg_ms}</td></tr>`;
+    });
+    box.innerHTML = h + `</table><div class="note" style="margin-top:10px">${d.health.total_attempts} total leg attempts across ${d.health.legs} legs.</div>`;
+  } catch (e) { box.innerHTML = `<div class="sysempty">failed to load: ${esc(String(e))}</div>`; }
+}
+
+/* ================= self-test ================= */$("selftest-btn").onclick = async () => {
   $("stmodal").classList.add("visible");
   $("stbody").innerHTML = "running probes...";
   try {

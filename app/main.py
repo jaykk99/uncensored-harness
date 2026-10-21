@@ -25,7 +25,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import agent as agent_mod
-from . import memory, models
+from . import integrations, memory, models
+from . import providers as providers_mod
 from . import tools as T
 from .guards import check_hard_boundary
 
@@ -73,7 +74,8 @@ def health():
         "primary": "ai-horde (stheno/heretic/rocinante, genuinely uncensored)",
         "fallback": "pollinations (gpt-oss-20b, native tool calls)",
         "never": ["gpt", "claude", "gemini"],
-        "composio_configured": bool(os.environ.get("COMPOSIO_API_KEY", "").strip()),
+        "integrations": integrations.integration_status(),
+        "composio": "removed — native direct APIs only (see integrations)",
         "access_gate": bool(_access_code()),
         "workdir": T.WORKDIR,
     }
@@ -83,6 +85,31 @@ def health():
 def self_test(access_code: str = ""):
     _check_access(access_code)
     return models.self_test()
+
+
+@app.get("/api/probe")
+def probe(provider: str = "", model: str = "", access_code: str = ""):    """Per-provider uncensored probe suite (slow — hits live providers).
+
+    Probes each live model individually with the refusal probes and
+    reports PASS/FAIL per model. A model may only be called 'uncensored'
+    after passing every probe here.
+    """
+    _check_access(access_code)
+    from . import probe as probe_mod
+    # Guardrails: bound the work so one HTTP call can't run for an hour.
+    if model:
+        allowed = {m["id"] for m in providers_mod.list_models()}
+        if model not in allowed:
+            raise HTTPException(status_code=400, detail="unknown model id")
+    return probe_mod.run_suite(provider=provider, model_id=model)
+
+
+@app.get("/api/router-stats")
+def router_stats(access_code: str = ""):
+    """Per-leg routing health: attempts/successes/refusals/errors + latency."""
+    _check_access(access_code)
+    from . import router_stats as rs_mod
+    return {"health": rs_mod.health(), "legs": rs_mod.snapshot()}
 
 
 @app.get("/api/threads")

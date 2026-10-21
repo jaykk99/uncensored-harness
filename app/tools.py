@@ -1,7 +1,10 @@
-"""Agent tools: terminal, filesystem, web, Composio, screenshots, browser control.
+"""Agent tools: terminal, filesystem, web, native integrations, screenshots, browser control.
 
 All filesystem/shell work is sandboxed to WORKDIR (~/harness-work by default).
 Screenshots go to WORKDIR/.shots/ and are served to the chat UI inline.
+
+Integrations are native direct REST APIs (app/integrations.py) — GitHub,
+GitLab, Gmail (OAuth), Vercel, Fal — no Composio middleman.
 """
 
 from __future__ import annotations
@@ -18,14 +21,14 @@ from urllib.parse import urlparse
 
 import httpx
 
+from . import integrations as NI
+
 WORKDIR = os.environ.get("HARNESS_WORKDIR", os.path.expanduser("~/harness-work"))
 SHOTS_DIR = os.path.join(WORKDIR, ".shots")
 os.makedirs(WORKDIR, exist_ok=True)
 os.makedirs(SHOTS_DIR, exist_ok=True)
 
 logger = logging.getLogger(__name__)
-
-COMPOSIO_BASE = "https://backend.composio.dev/api/v3"
 
 
 def _proxy() -> str | None:
@@ -268,29 +271,26 @@ async def web_search(query: str, max_results: int = 5) -> str:
     return "No results found."
 
 
-# ---------------------------------------------------------------- composio
+# ---------------------------------------------------------------- native integrations
+# Direct REST APIs (app/integrations.py) — no Composio middleman. Each router
+# returns an honest "not connected" message when its credential is missing.
 
-async def composio_execute(tool_slug: str, arguments: dict | None = None,
-                           connected_account_id: str = "") -> str:
-    key = os.environ.get("COMPOSIO_API_KEY", "").strip()
-    if not key:
-        return "Composio is not configured — COMPOSIO_API_KEY is missing."
+
+def _integration_call(router, action: str, arguments: dict | None) -> str:
     try:
-        async with _aclient(60) as c:
-            body: dict[str, Any] = {"tool_slug": tool_slug,
-                                   "arguments": arguments or {}}
-            if connected_account_id:
-                body["connected_account_id"] = connected_account_id
-            r = await c.post(f"{COMPOSIO_BASE}/tools/execute", json=body,
-                             headers={"x-api-key": key, "Content-Type": "application/json"})
-            if r.status_code == 401:
-                return "Composio key is invalid (401)."
-            data = r.json()
-            if r.status_code >= 400:
-                return f"Composio error {r.status_code}: {str(data)[:500]}"
-            return str(data)[:4000]
+        out = router(action or "", arguments or {})
+    except (ValueError, RuntimeError) as e:
+        return f"integration error: {e}"
     except Exception as e:
-        return f"Composio failed: {e}"
+        logger.warning("integration call failed: %s", e)
+        return f"integration error: {e}"
+    if isinstance(out, str):
+        return out
+    import json as _json
+    try:
+        return _json.dumps(out, indent=1)[:12000]
+    except Exception:
+        return str(out)[:12000]
 
 
 # ---------------------------------------------------------------- screenshots (playwright)
@@ -457,12 +457,26 @@ TOOLS: list[dict] = [
     _tool("web_fetch", "Fetch a public URL as text.",
           {"url": {"type": "string"}},
           lambda url: web_fetch(url)),
-    _tool("composio_execute", "Run an action on Jay's connected integrations (Gmail, GitHub, etc).",
-          {"tool_slug": {"type": "string", "description": "e.g. GMAIL_SEND_EMAIL"},
-           "arguments": {"type": "object", "description": "Tool arguments"},
-           "connected_account_id": {"type": "string"}},
-          lambda tool_slug, arguments=None, connected_account_id="": composio_execute(
-              tool_slug, arguments or {}, connected_account_id)),
+    _tool("github_api", "Jay's GitHub via the native REST API (needs GITHUB_TOKEN).",
+          {"action": {"type": "string", "description": "repos, repo, file, issues, create_issue, prs, workflow_runs, dispatch"},
+           "arguments": {"type": "object", "description": "Action args: owner_repo, path, title, body, workflow, ref, inputs, ..."}},
+          lambda action="", arguments=None: _integration_call(NI.github_action, action, arguments)),
+    _tool("gitlab_api", "Jay's GitLab via the native REST API (needs GITLAB_TOKEN).",
+          {"action": {"type": "string", "description": "projects, project, issues, pipelines"},
+           "arguments": {"type": "object", "description": "Action args: project_id, search, state, limit"}},
+          lambda action="", arguments=None: _integration_call(NI.gitlab_action, action, arguments)),
+    _tool("gmail", "Jay's Gmail via the native API (needs Google OAuth connect).",
+          {"action": {"type": "string", "description": "send, search, get"},
+           "arguments": {"type": "object", "description": "send: to, subject, body (show Jay the draft first); search: query; get: message_id"}},
+          lambda action="", arguments=None: _integration_call(NI.gmail_action, action, arguments)),
+    _tool("vercel_api", "Jay's Vercel via the native REST API (needs VERCEL_TOKEN).",
+          {"action": {"type": "string", "description": "projects, deployments, redeploy, env_vars, set_env"},
+           "arguments": {"type": "object", "description": "Action args: project, ref, key, value, target, limit"}},
+          lambda action="", arguments=None: _integration_call(NI.vercel_action, action, arguments)),
+    _tool("fal_generate", "Generate images with Fal.ai (needs FAL_KEY). Two-step: generate submits, result polls.",
+          {"action": {"type": "string", "description": "generate, status, result"},
+           "arguments": {"type": "object", "description": "generate: prompt, image_size, num_images; status/result: request_id, wait_s"}},
+          lambda action="", arguments=None: _integration_call(NI.fal_action, action, arguments)),
     _tool("screenshot", "Screenshot a public URL or a workdir HTML file. Returns inline image.",
           {"url": {"type": "string", "description": "Public URL to screenshot"},
            "html_path": {"type": "string", "description": "Workdir HTML file to screenshot"}},

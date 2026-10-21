@@ -28,6 +28,8 @@ from typing import Callable, Optional
 
 import httpx
 
+from . import router_stats
+
 logger = logging.getLogger(__name__)
 
 # Progress callback: sync callable taking a status string. It may be invoked
@@ -59,6 +61,15 @@ RETRYABLE_STATUS = {402, 408, 425, 429, 500, 502, 503, 504}
 # IP-rate-limited; back-to-back calls trigger 402s).
 _MIN_CALL_GAP_S = 1.5
 _last_pollinations_ts = 0.0
+
+
+def _record_leg(provider: str, model: str, outcome: str, started: float) -> None:
+    """Log one leg's outcome to router_stats. Never breaks a turn."""
+    try:
+        router_stats.record(provider, model, outcome,
+                            int((time.time() - started) * 1000))
+    except Exception:
+        pass
 
 
 def _sleep_backoff(attempt: int, base: float = 2.0, cap: float = 15.0) -> float:
@@ -433,11 +444,22 @@ def _race_first_response(messages: list[dict], max_tokens: int,
     from . import providers as providers_mod  # lazy: providers imports from here
 
     def _horde_race():
-        text = horde_chat(messages, max_tokens, temperature, timeout_s=45,
-                          progress=None, leg="Horde",
-                          preferred_model=preferred_model)
+        started = time.time()
+        horde_model = preferred_model or "auto"
+        try:
+            text = horde_chat(messages, max_tokens, temperature, timeout_s=45,
+                              progress=None, leg="Horde",
+                              preferred_model=preferred_model)
+        except _Refusal:
+            _record_leg("horde", horde_model, "refusal", started)
+            raise
+        except Exception:
+            _record_leg("horde", horde_model, "error", started)
+            raise
         if looks_like_refusal(text):
+            _record_leg("horde", horde_model, "refusal", started)
             raise _Refusal("horde refused")
+        _record_leg("horde", horde_model, "ok", started)
         return ("horde", text, [], None)
 
     def _fast_provider_race(provider_name: str, max_models: int = 2):
@@ -447,32 +469,44 @@ def _race_first_response(messages: list[dict], max_tokens: int,
             raise RuntimeError(f"unknown provider {provider_name}")
         last_err: Exception | None = None
         for model in p.models[:max_models]:
+            started = time.time()
             try:
                 msg = providers_mod.call_provider(
                     p, model, messages, max_tokens, temperature,
                     timeout=30, tools=tools, on_token=None, progress=None)
             except Exception as e:
+                _record_leg(provider_name, model, "error", started)
                 last_err = e
                 continue
             tool_calls = _parse_tool_calls(msg)
             text = (msg.get("content") or "").strip()
             if not tool_calls and looks_like_refusal(text):
+                _record_leg(provider_name, model, "refusal", started)
                 last_err = RuntimeError("refusal")
                 continue
             if not text and not tool_calls:
+                _record_leg(provider_name, model, "error", started)
                 last_err = RuntimeError("empty response")
                 continue
+            _record_leg(provider_name, model, "ok", started)
             return (f"{provider_name}/{model}", text, tool_calls, msg)
         raise RuntimeError(f"{provider_name} failed (last: {last_err})")
 
     def _pollinations_race():
-        msg = pollinations_chat(messages, max_tokens, temperature, timeout=45,
-                                tools=tools, retries=2, progress=None,
-                                on_token=None)
+        started = time.time()
+        try:
+            msg = pollinations_chat(messages, max_tokens, temperature, timeout=45,
+                                    tools=tools, retries=2, progress=None,
+                                    on_token=None)
+        except Exception:
+            _record_leg("pollinations", POLLINATIONS_MODEL, "error", started)
+            raise
         tool_calls = _parse_tool_calls(msg)
         text = msg.get("content") or ""
         if not tool_calls and looks_like_refusal(text):
+            _record_leg("pollinations", POLLINATIONS_MODEL, "refusal", started)
             raise _Refusal("pollinations refused")
+        _record_leg("pollinations", POLLINATIONS_MODEL, "ok", started)
         return ("pollinations", text, tool_calls, msg)
 
     legs = [
@@ -582,6 +616,7 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         progress("Omni providers exhausted — trying Pollinations…")
 
     # Fallback 1: Pollinations (native tool calls, streamed when possible)
+    _poll_started = time.time()
     try:
         msg = pollinations_chat(messages, max_tokens, temperature, timeout=60,
                                 tools=tools, retries=3, progress=progress,
@@ -589,28 +624,39 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         tool_calls = _parse_tool_calls(msg)
         text = msg.get("content") or ""
         if not tool_calls and looks_like_refusal(text):
+            _record_leg("pollinations", POLLINATIONS_MODEL, "refusal",
+                        _poll_started)
             logger.info("pollinations refused; retrying horde once more")
             raise _Refusal()
+        _record_leg("pollinations", POLLINATIONS_MODEL, "ok", _poll_started)
         return text, "pollinations", tool_calls, msg, streamed
     except _Refusal:
         logger.info("pollinations refusal -> final horde attempt")
         if progress:
             progress("Pollinations refused — final Horde retry…")
     except Exception as e:
+        _record_leg("pollinations", POLLINATIONS_MODEL, "error", _poll_started)
         logger.warning("pollinations failed: %s", e)
         if progress:
             progress(f"Pollinations failed ({e}) — final Horde retry…")
 
     # Fallback 2: Horde once more (a worker may have come online meanwhile)
+    _retry_started = time.time()
     try:
         text = horde_chat(messages, max_tokens, temperature, timeout_s=120,
                            progress=progress, leg="Horde leg 2 (final)",
                            preferred_model=preferred_model)
         label = "horde (retry)"
         if looks_like_refusal(text):
+            _record_leg("horde", preferred_model or "auto", "refusal",
+                        _retry_started)
             label = "horde (refused too)"
+        else:
+            _record_leg("horde", preferred_model or "auto", "ok",
+                        _retry_started)
         return text, label, [], None, streamed
     except Exception as e:
+        _record_leg("horde", preferred_model or "auto", "error", _retry_started)
         raise RuntimeError(f"all model legs failed (horde, pollinations, "
                            f"horde-retry; last: {e})") from e
 
@@ -647,11 +693,13 @@ def _omni_leg(messages: list[dict], max_tokens: int, temperature: float,
     if not chain:
         return None
     for p, model in chain:
+        started = time.time()
         try:
             msg = providers_mod.call_provider(
                 p, model, messages, max_tokens, temperature,
                 timeout=45, tools=tools, on_token=None, progress=progress)
         except Exception as e:
+            _record_leg(p.name, model, "error", started)
             logger.warning("omni %s/%s failed: %s", p.name, model, e)
             if progress:
                 progress(f"{p.label} failed — trying next provider…")
@@ -659,10 +707,13 @@ def _omni_leg(messages: list[dict], max_tokens: int, temperature: float,
         tool_calls = _parse_tool_calls(msg)
         text = (msg.get("content") or "").strip()
         if not tool_calls and looks_like_refusal(text):
+            _record_leg(p.name, model, "refusal", started)
             logger.info("omni %s/%s refused; trying next", p.name, model)
             continue
         if not text and not tool_calls:
+            _record_leg(p.name, model, "error", started)
             continue
+        _record_leg(p.name, model, "ok", started)
         return text, f"{p.name}/{model}", tool_calls, msg
     return None
 

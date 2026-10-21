@@ -2,48 +2,130 @@
 
 Standalone AI agent harness with **verified uncensored models only** — never GPT, Claude, Gemini, or any RLHF-tuned refuser.
 
-## Model routing (horde primary since 2026-10-17)
+Live: https://uncensored-harness-production.up.railway.app (Railway, sleep OFF, deploys from `main` via Dockerfile). Access is gated by `HARNESS_ACCESS_CODE`.
 
-1. **AI Horde** (primary) — keyless, genuinely uncensored workers:
-   Stheno (`koboldcpp/L3-8B-Stheno-v3.2`), Heretic variants, Rocinante
-   (`koboldcpp/Rocinante-X-12B-v1`). Verified genuinely uncensored.
-2. **Pollinations** (fallback) — keyless, OpenAI-compatible, `gpt-oss-20b`
-   open weights. Kept for its native tool-call support; answers are
-   refusal-probed and a refused/failing leg retries Horde once more.
-   A final Horde retry closes out the legs if Pollinations fails.
+## What it is
+
+A personal agent computer: chat UI, terminal + filesystem (sandboxed to the workdir), web search/fetch, a controlled headless browser with screenshots, an app maker that screenshots its own previews, and native direct-API integrations (GitHub, GitLab, Gmail, Vercel, Fal) — no middleware.
+
+**Uncensored means** no refusals on legitimate work — coding, business ops, research, writing, analysis, authorized security work on your own assets. It is *not* a bypass: a small set of hard boundaries stays in place (stolen-card fraud, phishing kits, draining anyone's funds, unauthorized hacking targets, weapons of mass harm, sexual content involving minors, doxxing). Those are the only refusals, ever, each paired with the nearest legitimate alternative. See `app/guards.py`.
+
+## Model routing
+
+Every turn goes through this chain (see `app/models.py`, `app/providers.py`):
+
+1. **Race (primary)** — AI Horde (45s cap: Stheno, Heretic, Rocinante workers, genuinely uncensored) runs *in parallel* against the fast keyless providers (Kilo Gateway, LLM7, Pollinations). Whichever answers first with a valid non-refusal response wins; the losers are cancelled. A slow Horde queue never blocks the turn when a fast provider is ready.
+2. **Omni chain (sequential fallback)** — explicit UI pick first, then uncensored keyed models (DeepInfra/Together Dolphin, OpenRouter Hermes) when their keys are set, then the keyless backstop (LLM7, Kilo), then remaining keyed providers with keys set. Each gets a short timeout.
+3. **Pollinations** (streamed, native tool calls).
+4. **Horde retry** (final) — a worker may have come online meanwhile.
+
+If every leg fails, the turn raises a clear error instead of hanging. Every leg records its outcome (ok / refusal / error + latency) to `app/router_stats.py`, visible at `GET /api/router-stats` and in the System tab's router-health table.
+
+### Providers
+
+Keyless (work with zero keys): AI Horde, Pollinations, LLM7, Kilo Gateway.
+Keyed (code is wired; the UI marks "needs key" until the env var is set):
+
+| Provider | Env var | Notes |
+|---|---|---|
+| DeepInfra | `DEEPINFRA_API_KEY` | Dolphin 2.9.1 (uncensored) first |
+| Together | `TOGETHER_API_KEY` | Dolphin 2.9.1 (uncensored) first |
+| OpenRouter | `OPENROUTER_API_KEY` | Hermes 3 70B (uncensored) first |
+| Groq | `GROQ_API_KEY` | gpt-oss-120b |
+| Cerebras | `CEREBRAS_API_KEY` | llama-3.3-70b, qwen-3-32b |
+| SambaNova | `SAMBANOVA_API_KEY` | Llama 3.3 70B, DeepSeek V3 |
+| NVIDIA NIM | `NVIDIA_API_KEY` | GLM, Laguna |
+| Mistral | `MISTRAL_API_KEY` | mistral-small, codestral |
+| Fireworks | `FIREWORKS_API_KEY` | llama-3.3-70b |
+| HuggingFace | `HF_TOKEN` | router.huggingface.co |
+| Cohere | `COHERE_API_KEY` | /v2/chat shape |
+| Gratisfy | `GRATISFY_API_KEY` | (no models listed yet) |
+
+`HORDE_API_KEY` is optional (better queue priority on Horde).
+
+### Uncensored probe suite
+
+`GET /api/self-test` probes the *active route*. `GET /api/probe` (and `python -m app.probe`) goes further: it runs the refusal probes against **each live model individually** and scores PASS/FAIL per model. The System tab has a per-provider probe runner UI.
+
+**Standing rule:** a provider or model may only be described as "uncensored" or "fixed" after passing *every* probe in this suite. The suite reports; it never flips labels on its own.
+
+```bash
+python -m app.probe --provider groq        # probe one provider
+python -m app.probe --model "kilo:kilo-auto/free" --json
+```
+
+## Native integrations (no Composio)
+
+`app/integrations.py` talks to each provider's own REST API directly. When a credential is missing, the tool says so honestly instead of failing obscurely. Status is on `GET /api/health` → `integrations`, and in the System tab.
+
+| Tool | Env | Actions |
+|---|---|---|
+| `github_api` | `GITHUB_TOKEN` | repos, repo, file, issues, create_issue, prs, workflow_runs, dispatch |
+| `gitlab_api` | `GITLAB_TOKEN` (+ `GITLAB_HOST`) | projects, project, issues, pipelines |
+| `gmail` | `GOOGLE_OAUTH_CLIENT_ID` + `GOOGLE_OAUTH_CLIENT_SECRET` + `GOOGLE_REFRESH_TOKEN` | send, search, get |
+| `vercel_api` | `VERCEL_TOKEN` (+ `VERCEL_TEAM_ID`) | projects, deployments, redeploy, env_vars, set_env |
+| `fal_generate` | `FAL_KEY` (+ `FAL_IMAGE_MODEL`) | generate, status, result |
+
+Gmail needs the one-time Google connect (OAuth consent with offline access) to mint `GOOGLE_REFRESH_TOKEN`. Sending mail is approval-gated: the agent shows Jay the draft and waits for his OK before calling `gmail/send`.
 
 ## Capabilities
 
-- Chat with Claude-like UI: thinking indicator, markdown, code blocks with copy/run,
-  live app preview, inline screenshots
-- Terminal + filesystem (sandboxed to workdir)
-- Web search + fetch, Composio integrations
-- Controlled headless browser (open/click/fill) with automatic screenshots
-- App maker: builds web apps, screenshots the preview automatically
-- `GET /api/self-test` — refusal-probe verification endpoint
+- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar, model picker with live/keyless badges
+- Terminal + filesystem, sandboxed to `HARNESS_WORKDIR` (default `~/harness-work`); path escapes rejected
+- Web search (Bing RSS primary, DuckDuckGo fallback) + fetch, with SSRF guards (no localhost/private IPs/metadata hosts)
+- Controlled headless browser (open/click/fill/text) with automatic screenshots (Playwright)
+- App maker: builds web apps, auto-screenshots the preview
+- Image generation tab (Pollinations) + `fal_generate` agent tool
+- System tab: integration status, per-provider probe runner, router health
 
-## Run
+## API endpoints
 
-```bash
-cd ~/workspace/uncensored-harness
-./.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Env: `HARNESS_ACCESS_CODE` (optional gate), `HARNESS_WORKDIR` (default ~/harness-work),
-`COMPOSIO_API_KEY` (optional), `HORDE_API_KEY` (optional, better queue priority).
-
-## Endpoints
+All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS_CODE` is set.
 
 - `GET /` — chat UI
-- `GET /api/health` — liveness + routing
-- `GET /api/self-test` — refusal probes, verdict
-- `GET /api/models` — model list grouped by provider (access_code)
-- `GET /api/threads` — list threads (access_code)
-- `POST /api/chat` — SSE agent turn
+- `GET /api/health` — liveness, routing summary, integration status
+- `GET /api/self-test` — refusal probes against the active route
+- `GET /api/probe?provider=&model=` — per-model probe suite (slow)
+- `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, latency)
+- `GET /api/models` — model list grouped by provider, with live key status
+- `GET /api/threads` — list threads
+- `POST /api/chat` — SSE agent turn `{message, thread_id, access_code, model, web_search}`
 - `POST /api/run` — python/javascript code runner
-- `POST /api/shell` — terminal
+- `POST /api/shell` — terminal command
 - `GET /api/files`, `GET /api/preview`, `GET /api/shot/{name}`
 
-## Live URL
+## Run locally
 
-https://uncensored-harness-production.up.railway.app
+```bash
+pip install -r requirements.txt
+export HARNESS_ACCESS_CODE=secret
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+See `.env.example` for the full env var list. On Railway/Render, set env vars in the dashboard; the Dockerfile installs Playwright + Chromium for screenshots.
+
+## Tests
+
+```bash
+pip install pytest
+python -m pytest tests/ -q
+```
+
+172 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, and router stats. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
+
+## Architecture
+
+```
+static/index.html   chat / image / terminal / system UI (SSE)
+app/main.py         FastAPI: chat SSE, code/shell/files, probes, stats
+app/agent.py        model -> tools -> model loop (OpenAI tool format + fenced fallback)
+app/models.py       routing: race -> omni -> pollinations -> horde retry
+app/providers.py    provider table + omni_chain (uncensored-first ordering)
+app/probe.py        per-model refusal probe suite (+ CLI)
+app/router_stats.py sqlite leg-health tracking
+app/integrations.py native GitHub/GitLab/Gmail/Vercel/Fal REST clients
+app/tools.py        agent tool registry (shell, files, web, browser, integrations)
+app/guards.py       hard-boundary pre-check (tiny by design — legit work passes)
+app/memory.py       sqlite threads
+app/forwarder.py    local CONNECT forwarder for Chromium proxy auth
+```

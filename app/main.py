@@ -88,7 +88,8 @@ def self_test(access_code: str = ""):
 
 
 @app.get("/api/probe")
-def probe(provider: str = "", model: str = "", access_code: str = ""):    """Per-provider uncensored probe suite (slow — hits live providers).
+def probe(provider: str = "", model: str = "", access_code: str = ""):
+    """Per-provider uncensored probe suite (slow — hits live providers).
 
     Probes each live model individually with the refusal probes and
     reports PASS/FAIL per model. A model may only be called 'uncensored'

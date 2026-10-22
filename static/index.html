@@ -1327,7 +1327,20 @@ async function loadRouterHealth() {
         `<td><div class="rbar"><div style="width:${pct}%"></div></div></td>` +
         `<td>${l.refusals}</td><td>${l.errors}</td><td>${l.avg_ms}</td></tr>`;
     });
-    box.innerHTML = h + `</table><div class="note" style="margin-top:10px">${d.health.total_attempts} total leg attempts across ${d.health.legs} legs.</div>`;
+    box.innerHTML = h + `</table><div class="note" style="margin-top:10px">${d.health.total_attempts} total leg attempts across ${d.health.legs} legs.</div>` +
+      `<div style="margin-top:10px"><button class="pbtn" id="rresetbtn">Reset stats</button> <span class="note">clears stale history (e.g. after a provider outage is fixed)</span></div>`;
+    $("rresetbtn").onclick = async () => {
+      if (!confirm("Clear all router health stats? They rebuild as you chat.")) return;
+      const btn = $("rresetbtn"); btn.disabled = true;
+      try {
+        const r = await fetch("/api/router-stats/reset", { method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ access_code: AC }) });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || "reset failed");
+        loadRouterHealth();
+      } catch (e) { alert("reset failed: " + e.message); btn.disabled = false; }
+    };
   } catch (e) { box.innerHTML = `<div class="sysempty">failed to load: ${esc(String(e))}</div>`; }
 }
 

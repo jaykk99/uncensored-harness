@@ -66,6 +66,12 @@ class ShellRequest(BaseModel):
     access_code: str = ""
 
 
+class RouterResetRequest(BaseModel):
+    provider: str = ""
+    model: str = ""
+    access_code: str = ""
+
+
 @app.get("/api/health")
 def health():
     return {
@@ -110,6 +116,20 @@ def router_stats(access_code: str = ""):
     _check_access(access_code)
     from . import router_stats as rs_mod
     return {"health": rs_mod.health(), "legs": rs_mod.snapshot()}
+
+
+@app.post("/api/router-stats/reset")
+def router_stats_reset(req: RouterResetRequest):
+    """Clear router leg stats (all, or one provider/model).
+
+    Stale stats drag the health table down long after a provider outage
+    is fixed; this gives the System tab a clean slate. The stats rebuild
+    naturally as new turns run.
+    """
+    _check_access(req.access_code)
+    from . import router_stats as rs_mod
+    n = rs_mod.reset(provider=req.provider, model=req.model)
+    return {"cleared": n}
 
 
 @app.get("/api/threads")

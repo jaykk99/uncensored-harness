@@ -61,6 +61,30 @@ def test_shot_missing_file_is_404_with_code(monkeypatch):
     assert r.status_code == 404
 
 
+def test_router_stats_reset_requires_code(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    c = _client()
+    r = c.post("/api/router-stats/reset", json={})
+    assert r.status_code == 401
+    r = c.post("/api/router-stats/reset",
+               json={"access_code": "wrong"})
+    assert r.status_code == 401
+
+
+def test_router_stats_reset_clears(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    from app import router_stats as rs_mod
+    rs_mod.record("test-provider", "test-model", "error", 10)
+    assert any(l["provider"] == "test-provider" for l in rs_mod.snapshot())
+    c = _client()
+    r = c.post("/api/router-stats/reset",
+               json={"access_code": CODE, "provider": "test-provider"})
+    assert r.status_code == 200
+    assert r.json()["cleared"] == 1
+    assert not any(l["provider"] == "test-provider"
+                   for l in rs_mod.snapshot())
+
+
 def test_health_does_not_leak_workdir(monkeypatch):
     # /api/health is unauthenticated by design (liveness); it must not
     # disclose server filesystem paths.

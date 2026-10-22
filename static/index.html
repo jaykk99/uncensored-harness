@@ -955,7 +955,7 @@ function appendShot(bubble, shot, caption) {
   const d = document.createElement("div");
   d.className = "shot";
   const im = document.createElement("img");
-  im.src = "/api/shot/" + encodeURIComponent(shot);
+  im.src = "/api/shot/" + encodeURIComponent(shot) + "?access_code=" + encodeURIComponent(AC);
   im.alt = "screenshot";
   const cap = document.createElement("div");
   cap.className = "cap"; cap.textContent = caption || "screenshot";

@@ -1,0 +1,73 @@
+"""Tests for app/main.py HTTP gates.
+
+The harness is access-code gated by design: every endpoint that serves
+agent work must require the code. /api/shot/{name} serves screenshots of
+anything the agent did (browser sessions, files, chats), so it must not
+be publicly fetchable.
+"""
+
+from __future__ import annotations
+
+import os
+
+from app import tools as T
+
+CODE = "secret123"
+
+
+def _client():
+    from fastapi.testclient import TestClient
+    from app import main as main_mod
+    return TestClient(main_mod.app)
+
+
+def test_shot_requires_access_code(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    c = _client()
+    r = c.get("/api/shot/whatever.png")
+    assert r.status_code == 401
+    r = c.get("/api/shot/whatever.png?access_code=wrong")
+    assert r.status_code == 401
+
+
+def test_shot_wrong_code_is_401_not_404(monkeypatch):
+    # Auth is checked before the file lookup: a wrong code must not leak
+    # whether the screenshot exists.
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    c = _client()
+    r = c.get("/api/shot/definitely-not-here.png?access_code=nope")
+    assert r.status_code == 401
+
+
+def test_shot_serves_with_code(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    p = os.path.join(T.SHOTS_DIR, "test-shot-gate.png")
+    with open(p, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\nfakepng")
+    try:
+        c = _client()
+        r = c.get(f"/api/shot/test-shot-gate.png?access_code={CODE}")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/png"
+        assert r.content.startswith(b"\x89PNG")
+    finally:
+        os.remove(p)
+
+
+def test_shot_missing_file_is_404_with_code(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    c = _client()
+    r = c.get(f"/api/shot/no-such-shot.png?access_code={CODE}")
+    assert r.status_code == 404
+
+
+def test_health_does_not_leak_workdir(monkeypatch):
+    # /api/health is unauthenticated by design (liveness); it must not
+    # disclose server filesystem paths.
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    c = _client()
+    r = c.get("/api/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert "workdir" not in body
+    assert body.get("ok") is True

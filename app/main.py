@@ -10,7 +10,7 @@ Endpoints:
   POST /api/shell         — terminal {command, access_code}
   GET  /api/files         — list workdir files (access_code)
   GET  /api/preview       — serve a workdir HTML file for live preview (path)
-  GET  /api/shot/{name}   — serve a screenshot PNG
+  GET  /api/shot/{name}   — serve a screenshot PNG (access_code, gated)
 """
 
 from __future__ import annotations
@@ -77,7 +77,6 @@ def health():
         "integrations": integrations.integration_status(),
         "composio": "removed — native direct APIs only (see integrations)",
         "access_gate": bool(_access_code()),
-        "workdir": T.WORKDIR,
     }
 
 
@@ -164,16 +163,6 @@ async def chat(req: ChatRequest):
 
     async def stream():
         yield f"data: {json.dumps({'type': 'thread', 'thread_id': thread_id})}\n\n"
-
-        async def emit(ev: dict):
-            yield f"data: {json.dumps(ev)}\n\n"
-
-        # Wrap emit for the agent (agent calls emit as async fn, not async-gen)
-        async def emit_cb(ev: dict):
-            nonlocal_gen = emit(ev)
-            async for chunk in nonlocal_gen:
-                # push chunk into the outer generator via queue
-                await queue.put(chunk)
 
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -305,7 +294,11 @@ def preview(path: str = "", access_code: str = ""):
 
 
 @app.get("/api/shot/{name}")
-def shot(name: str):
+def shot(name: str, access_code: str = ""):
+    # Gated like every other endpoint: screenshots can contain anything the
+    # agent did (browsers, files, chats), so they must not be publicly
+    # fetchable. The UI appends ?access_code= to every shot <img> src.
+    _check_access(access_code)
     p = os.path.join(T.SHOTS_DIR, os.path.basename(name))
     if not os.path.isfile(p):
         raise HTTPException(status_code=404, detail="no such screenshot")

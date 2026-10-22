@@ -15,9 +15,10 @@ import logging
 import os
 import re
 import shlex
+import socket
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -173,7 +174,39 @@ def _blocked_url(raw: str) -> str | None:
             return "private IP ranges are not fetchable"
     except ValueError:
         pass
+    dns_hit = _dns_blocked(host)
+    if dns_hit:
+        return dns_hit
     return None
+
+
+def _dns_blocked(host: str) -> str | None:
+    """Block hostnames that resolve to non-public IPs.
+
+    Catches DNS-rebinding and "public hostname -> 127.0.0.1/169.254.x.x"
+    tricks that a literal-IP check misses. Returns a reason string when
+    blocked, None when allowed. Names that fail to resolve fail OPEN —
+    the connection itself will error out anyway.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return None
+    for _fam, _type, _proto, _canon, sockaddr in infos:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        if (ip.is_loopback or ip.is_private or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast):
+            return f"{host} resolves to non-public IP {sockaddr[0]}"
+    return None
+
+
+# Redirect statuses httpx would follow; we follow them manually instead so
+# every hop re-passes _blocked_url (a public URL can 302 to 169.254.169.254).
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+_MAX_REDIRECTS = 5
 
 
 def _html_to_text(html: str, max_chars: int = 8000) -> str:
@@ -191,16 +224,34 @@ async def web_fetch(url: str, max_chars: int = 8000) -> str:
     if blocked:
         return f"Blocked: {blocked}"
     try:
-        async with _aclient(25, follow_redirects=True,
+        async with _aclient(25, follow_redirects=False,
                                headers={"User-Agent": "uncensored-harness/1.0"}) as c:
-            r = await c.get(url)
+            current = url
+            r = None
+            for _hop in range(_MAX_REDIRECTS + 1):
+                r = await c.get(current)
+                if r.status_code not in _REDIRECT_STATUSES:
+                    break
+                loc = r.headers.get("location")
+                if not loc:
+                    break
+                current = urljoin(current, loc)
+                # Re-check every hop: a public URL may redirect to a
+                # private host (cloud metadata 169.254.169.254 is the
+                # classic target), which follow_redirects would have
+                # chased silently.
+                hop_blocked = _blocked_url(current)
+                if hop_blocked:
+                    return f"Blocked redirect: {hop_blocked}"
+            else:
+                return f"Too many redirects fetching {url}"
             if r.status_code >= 400:
-                return f"HTTP {r.status_code} fetching {url}"
+                return f"HTTP {r.status_code} fetching {current}"
             ctype = r.headers.get("content-type", "")
             text = _html_to_text(r.text, max_chars) if "html" in ctype else r.text[:max_chars]
             m = re.search(r"<title[^>]*>(.*?)</title>", r.text, re.I | re.S)
             title = m.group(1).strip()[:200] if m else ""
-            return f"URL: {url}\nTitle: {title}\n\n{text}"
+            return f"URL: {current}\nTitle: {title}\n\n{text}"
     except Exception as e:
         return f"Fetch failed: {e}"
 
@@ -413,7 +464,9 @@ async def browser_fill(selector: str, text: str) -> dict:
         shot = await _page_shot("fill")
         return {"ok": True, "url": page.url, "shot": shot}
     except Exception as e:
-        return f"browser_fill failed: {e}"
+        # Keep the dict shape like the other browser_* tools so the agent
+        # and UI can always rely on out["ok"] / out["error"].
+        return {"ok": False, "error": f"browser_fill failed: {e}"}
 
 
 async def browser_text(max_chars: int = 6000) -> str:

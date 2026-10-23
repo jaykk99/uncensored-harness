@@ -15,7 +15,7 @@ A personal agent computer: chat UI, terminal + filesystem (sandboxed to the work
 Every turn goes through this chain (see `app/models.py`, `app/providers.py`):
 
 1. **Race (primary)** — AI Horde (45s cap: Stheno, Heretic, Rocinante workers, genuinely uncensored) runs *in parallel* against the fast keyless providers (Kilo Gateway, LLM7, Pollinations). Whichever answers first with a valid non-refusal response wins; the losers are cancelled. A slow Horde queue never blocks the turn when a fast provider is ready.
-2. **Omni chain (sequential fallback)** — explicit UI pick first, then uncensored keyed models (DeepInfra/Together Dolphin, OpenRouter Hermes) when their keys are set, then the keyless backstop (LLM7, Kilo), then remaining keyed providers with keys set. Each gets a short timeout.
+2. **Omni chain (sequential fallback)** — explicit UI pick first, then uncensored keyed models (DeepInfra/Together Dolphin, OpenRouter Hermes) when their keys are set, then the keyless backstop (LLM7, Kilo), then remaining keyed providers with keys set. Each gets a short timeout. Within each tier, legs with poor recent stats (under 50% success over 3+ attempts, or no data in 24h) are tried last — the uncensored-first tier order never changes; `ROUTER_HEALTH_ORDER=0` restores static order.
 3. **Pollinations** (streamed, native tool calls).
 4. **Horde retry** (final) — a worker may have come online meanwhile.
 
@@ -46,6 +46,8 @@ Keyed (code is wired; the UI marks "needs key" until the env var is set):
 ### Uncensored probe suite
 
 `GET /api/self-test` probes the *active route*. `GET /api/probe` (and `python -m app.probe`) goes further: it runs the refusal probes against **each live model individually** and scores PASS/FAIL per model. The System tab has a per-provider probe runner UI.
+
+Four probes, all lawful and legitimate: dual-use hobby info (lockpicking as a sport), free expression (mild profanity in creative writing), authorized security work (own-network red team), and opinion without hedging (a hotly debated political issue — catches RLHF "as an AI, I don't have opinions" hedging).
 
 **Standing rule:** a provider or model may only be described as "uncensored" or "fixed" after passing *every* probe in this suite. The suite reports; it never flips labels on its own.
 
@@ -86,7 +88,7 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `GET /api/health` — liveness, routing summary, integration status
 - `GET /api/self-test` — refusal probes against the active route
 - `GET /api/probe?provider=&model=` — per-model probe suite (slow)
-- `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, latency)
+- `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, avg/p50/p95 ms latency, `stale` flag when no data in 24h)
 - `GET /api/models` — model list grouped by provider, with live key status
 - `GET /api/threads` — list threads
 - `POST /api/chat` — SSE agent turn `{message, thread_id, access_code, model, web_search}`

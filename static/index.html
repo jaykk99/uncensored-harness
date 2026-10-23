@@ -362,6 +362,9 @@
   .rtable tr:last-child td { border-bottom: 0; }
   .rbar { height: 6px; border-radius: 3px; background: var(--panel2); overflow: hidden; min-width: 80px; }
   .rbar > div { height: 100%; background: var(--green); border-radius: 3px; }
+  .stale { color: var(--amber, #d9a441); font-size: 10.5px; font-weight: 700; border: 1px solid var(--amber, #d9a441);
+    border-radius: 3px; padding: 0 4px; margin-left: 6px; white-space: nowrap; }
+  .rtable tr.is-stale td { opacity: 0.62; }
   .sysempty { color: var(--dim); font-size: 13px; padding: 8px 0; }
 
   @media (max-width: 820px) {
@@ -1319,15 +1322,16 @@ async function loadRouterHealth() {
     const d = await (await fetch("/api/router-stats?access_code=" + encodeURIComponent(AC))).json();
     const legs = d.legs || [];
     if (!legs.length) { box.innerHTML = `<div class="sysempty">no turns recorded yet — chat once and the legs show up here.</div>`; return; }
-    let h = `<table class="rtable"><tr><th>Leg</th><th>Success</th><th></th><th>Refusals</th><th>Errors</th><th>Avg ms</th></tr>`;
+    let h = `<table class="rtable"><tr><th>Leg</th><th>Success</th><th></th><th>Refusals</th><th>Errors</th><th>Avg ms</th><th>p50 / p95 ms</th></tr>`;
     legs.slice(0, 25).forEach(l => {
       const pct = Math.round(l.success_rate * 100);
-      h += `<tr><td>${esc(l.provider)}<br><span style="color:var(--dim);font-size:11px">${esc(String(l.model).slice(0, 40))}</span></td>` +
+      const staleTag = l.stale ? `<span class="stale">STALE</span>` : "";
+      h += `<tr class="${l.stale ? "is-stale" : ""}"><td>${esc(l.provider)}${staleTag}<br><span style="color:var(--dim);font-size:11px">${esc(String(l.model).slice(0, 40))}</span></td>` +
         `<td>${l.successes}/${l.attempts}</td>` +
         `<td><div class="rbar"><div style="width:${pct}%"></div></div></td>` +
-        `<td>${l.refusals}</td><td>${l.errors}</td><td>${l.avg_ms}</td></tr>`;
+        `<td>${l.refusals}</td><td>${l.errors}</td><td>${l.avg_ms}</td><td>${l.p50_ms} / ${l.p95_ms}</td></tr>`;
     });
-    box.innerHTML = h + `</table><div class="note" style="margin-top:10px">${d.health.total_attempts} total leg attempts across ${d.health.legs} legs.</div>` +
+    box.innerHTML = h + `</table><div class="note" style="margin-top:10px">${d.health.total_attempts} total leg attempts across ${d.health.legs} legs (${d.health.stale_legs || 0} stale — no data in 24h).</div>` +
       `<div style="margin-top:10px"><button class="pbtn" id="rresetbtn">Reset stats</button> <span class="note">clears stale history (e.g. after a provider outage is fixed)</span></div>`;
     $("rresetbtn").onclick = async () => {
       if (!confirm("Clear all router health stats? They rebuild as you chat.")) return;

@@ -146,6 +146,83 @@ def test_chain_entries_reference_real_provider_models():
 
 
 # ---------------------------------------------------------------------------
+# Health-aware ordering — poor legs demoted within their tier, never across
+# ---------------------------------------------------------------------------
+
+def _row(provider, model, attempts=10, rate=1.0, stale=False):
+    return {"provider": provider, "model": model, "attempts": attempts,
+            "success_rate": rate, "stale": stale}
+
+
+def test_health_order_demotes_failing_leg_within_tier():
+    stats = [_row("llm7", "codestral-latest", rate=0.0)]
+    chain = omni_chain(stats=stats)
+    keys = [f"{p.name}/{m}" for p, m in chain]
+    bad = "llm7/codestral-latest"
+    assert keys.index(bad) > keys.index("kilo/kilo-auto/free")
+    # Still ahead of nothing keyed: no keys set, so the chain ends at tier 2.
+    assert keys[-1] == bad
+
+
+def test_health_order_stale_leg_demoted():
+    stats = [_row("llm7", "codestral-latest", stale=True)]
+    chain = omni_chain(stats=stats)
+    keys = [f"{p.name}/{m}" for p, m in chain]
+    assert keys[-1] == "llm7/codestral-latest"
+
+
+def test_health_order_never_crosses_tiers(monkeypatch):
+    # Even a failing uncensored-keyed leg outranks keyless legs: the
+    # uncensored-first promise holds regardless of stats.
+    monkeypatch.setenv("DEEPINFRA_API_KEY", "x")
+    stats = [_row("deepinfra",
+                  "cognitivecomputations/dolphin-2.9.1-llama-3-70b", rate=0.0)]
+    chain = omni_chain(stats=stats)
+    names = [p.name for p, _ in chain]
+    assert names.index("deepinfra") < names.index("llm7")
+    assert names.index("deepinfra") < names.index("kilo")
+
+
+def test_health_order_good_leg_keeps_static_place():
+    stats = [_row("llm7", "codestral-latest", rate=1.0)]
+    chain = omni_chain(stats=stats)
+    (p, m), *_ = chain
+    assert p.name == "llm7" and m == "codestral-latest"
+
+
+def test_health_order_ignores_thin_data():
+    # One failure is noise, not a pattern — no demotion.
+    stats = [_row("llm7", "codestral-latest", attempts=1, rate=0.0)]
+    chain = omni_chain(stats=stats)
+    (p, m), *_ = chain
+    assert p.name == "llm7" and m == "codestral-latest"
+
+
+def test_health_order_ignores_unknown_legs():
+    stats = [_row("nope", "ghost-model", rate=0.0)]
+    chain = omni_chain(stats=stats)
+    assert chain == omni_chain()
+
+
+def test_health_order_disabled_via_env(monkeypatch):
+    monkeypatch.setenv("ROUTER_HEALTH_ORDER", "0")
+    stats = [_row("llm7", "codestral-latest", rate=0.0)]
+    assert omni_chain(stats=stats) == omni_chain()
+
+
+def test_health_order_stable_for_equal_penalty():
+    # Good legs never shuffle: penalty-0 entries keep static relative order.
+    stats = [_row("kilo", "kilo-auto/free", rate=0.0)]
+    chain = omni_chain(stats=stats)
+    static = omni_chain()
+    good_static = [k for k in (f"{p.name}/{m}" for p, m in static)
+                   if k != "kilo/kilo-auto/free"]
+    good_health = [k for k in (f"{p.name}/{m}" for p, m in chain)
+                   if k != "kilo/kilo-auto/free"]
+    assert good_health == good_static
+
+
+# ---------------------------------------------------------------------------
 # list_models — the /api/models + UI picker feed
 # ---------------------------------------------------------------------------
 

@@ -43,7 +43,7 @@ def stub_all_ok(monkeypatch):
 
 def test_probe_one_model_all_pass(stub_all_ok):
     entry = probe_mod.probe_one_model("llm7", "llm7:codestral-latest")
-    assert entry["passed"] == entry["total"] == 3
+    assert entry["passed"] == entry["total"] == len(models.SELF_TEST_PROBES)
     assert entry["error"] == ""
     assert all(p["passed"] for p in entry["probes"])
     assert entry["elapsed_s"] >= 0
@@ -77,7 +77,7 @@ def test_probe_via_provider_uses_bare_model_id(monkeypatch):
     monkeypatch.setattr(providers_mod, "call_provider", fake_call)
     entry = probe_mod.probe_one_model("kilo", "kilo:kilo-auto/free")
     assert seen == {"provider": "kilo", "model": "kilo-auto/free"}
-    assert entry["passed"] == 3
+    assert entry["passed"] == len(models.SELF_TEST_PROBES)
 
 
 def test_run_suite_skips_unkeyed_providers(stub_all_ok):

@@ -80,4 +80,113 @@ def test_reset():
 
 def test_snapshot_empty():
     assert rs.snapshot() == []
-    assert rs.health() == {"providers": {}, "legs": 0, "total_attempts": 0}
+    assert rs.health() == {"providers": {}, "legs": 0, "stale_legs": 0,
+                           "total_attempts": 0}
+
+
+# ---------------------------------------------------------------------------
+# Latency percentiles (p50/p95 from capped per-leg samples)
+# ---------------------------------------------------------------------------
+
+def test_percentiles_nearest_rank():
+    for i in range(1, 101):  # latencies 1..100 ms
+        rs.record("kilo", "m", "ok", i)
+    (row,) = rs.snapshot()
+    assert row["p50_ms"] == 50
+    assert row["p95_ms"] == 95
+    assert row["avg_ms"] == 50  # avg rounds down here; p95 tells the real story
+
+
+def test_percentiles_odd_sample_count():
+    for ms in (10, 20, 30, 40, 50):
+        rs.record("kilo", "m", "ok", ms)
+    (row,) = rs.snapshot()
+    assert row["p50_ms"] == 30
+    assert row["p95_ms"] == 50
+
+
+def test_percentiles_separate_per_leg():
+    rs.record("kilo", "fast", "ok", 10)
+    rs.record("kilo", "slow", "ok", 900)
+    rows = {r["model"]: r for r in rs.snapshot()}
+    assert rows["fast"]["p95_ms"] == 10
+    assert rows["slow"]["p95_ms"] == 900
+
+
+def test_latency_samples_capped():
+    for i in range(rs.LAT_SAMPLE_CAP + 50):
+        rs.record("kilo", "m", "ok", i)
+    from app import router_stats as rs_mod
+    c = rs_mod._conn()
+    n = c.execute("SELECT COUNT(*) FROM router_lat").fetchone()[0]
+    c.close()
+    assert n == rs.LAT_SAMPLE_CAP
+    # Percentile is computed over the newest samples (0..49 pruned away).
+    (row,) = rs_mod.snapshot()
+    assert row["p50_ms"] > 100
+
+
+def test_reset_clears_latency_samples():
+    from app import router_stats as rs_mod
+    rs_mod.record("kilo", "m", "ok", 10)
+    assert rs_mod.reset(provider="kilo") == 1
+    c = rs_mod._conn()
+    n = c.execute("SELECT COUNT(*) FROM router_lat").fetchone()[0]
+    c.close()
+    assert n == 0
+    # Re-recorded leg starts with fresh percentiles, no ghost history.
+    rs_mod.record("kilo", "m", "ok", 500)
+    (row,) = rs_mod.snapshot()
+    assert row["p50_ms"] == 500 and row["p95_ms"] == 500
+
+
+# ---------------------------------------------------------------------------
+# Stale legs (no data within ROUTER_STALE_HOURS, default 24)
+# ---------------------------------------------------------------------------
+
+def test_fresh_leg_not_stale():
+    rs.record("kilo", "m", "ok", 10)
+    (row,) = rs.snapshot()
+    assert row["stale"] is False
+
+
+def test_old_leg_is_stale():
+    import time
+    from app import router_stats as rs_mod
+    rs_mod.record("kilo", "m", "ok", 10)
+    c = rs_mod._conn()
+    c.execute("UPDATE router_stats SET last_seen=?",
+              (time.time() - 25 * 3600,))
+    c.commit()
+    c.close()
+    (row,) = rs_mod.snapshot()
+    assert row["stale"] is True
+
+
+def test_stale_threshold_env_override(monkeypatch):
+    import time
+    from app import router_stats as rs_mod
+    monkeypatch.setenv("ROUTER_STALE_HOURS", "1")
+    rs_mod.record("kilo", "m", "ok", 10)
+    c = rs_mod._conn()
+    c.execute("UPDATE router_stats SET last_seen=?",
+              (time.time() - 2 * 3600,))
+    c.commit()
+    c.close()
+    (row,) = rs_mod.snapshot()
+    assert row["stale"] is True
+
+
+def test_health_counts_stale_legs():
+    import time
+    from app import router_stats as rs_mod
+    rs_mod.record("kilo", "fresh", "ok", 10)
+    rs_mod.record("kilo", "old", "ok", 10)
+    c = rs_mod._conn()
+    c.execute("UPDATE router_stats SET last_seen=? WHERE model='old'",
+              (time.time() - 30 * 3600,))
+    c.commit()
+    c.close()
+    h = rs_mod.health()
+    assert h["legs"] == 2
+    assert h["stale_legs"] == 1

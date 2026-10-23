@@ -421,7 +421,34 @@ def list_models() -> list[dict]:
     return out
 
 
-def omni_chain(preferred_id: str = "") -> list[tuple[ProviderDef | None, str]]:
+def _health_penalty(provider_name: str, model: str,
+                    by_leg: dict[tuple[str, str], dict]) -> int:
+    """Demotion penalty (0 = keep, 1 = bad stats, 2 = stale) for one leg.
+
+    A leg is only demoted on real evidence: >=3 attempts with under 50%
+    success, or no data within ROUTER_STALE_HOURS. Thin data and unknown
+    legs stay in static order.
+    """
+    row = by_leg.get((provider_name, model))
+    if not row:
+        return 0
+    if row.get("stale"):
+        return 2
+    try:
+        attempts = int(row.get("attempts") or 0)
+        rate = float(row.get("success_rate") or 0.0)
+    except (TypeError, ValueError):
+        return 0
+    return 1 if attempts >= 3 and rate < 0.5 else 0
+
+
+def _health_order_enabled() -> bool:
+    return os.environ.get("ROUTER_HEALTH_ORDER", "1").lower() not in (
+        "0", "false", "no", "off")
+
+
+def omni_chain(preferred_id: str = "",
+               stats: list[dict] | None = None) -> list[tuple[ProviderDef | None, str]]:
     """Ordered fallback chain of (provider_def, model) tuples.
 
     Order: explicit pick first, then uncensored-keyed, then keyless
@@ -429,36 +456,50 @@ def omni_chain(preferred_id: str = "") -> list[tuple[ProviderDef | None, str]]:
     Horde and Pollinations are handled by models.chat's existing legs;
     this chain covers everything in between.
     Each entry is tried with a short timeout; failures move to the next.
+
+    stats (router_stats.snapshot() rows) enables health-aware ordering:
+    within a tier, legs with poor recent stats (>=3 attempts, <50%
+    success) or stale data are tried last. Tier order itself never
+    changes — the uncensored-first promise holds regardless of stats.
+    Set ROUTER_HEALTH_ORDER=0 to force static order.
     """
-    chain: list[tuple[ProviderDef | None, str]] = []
+    tiers: list[tuple[int, ProviderDef, str]] = []
     seen: set[str] = set()
 
-    def push(p: ProviderDef | None, model: str):
-        k = f"{p.name if p else '?'}/{model}"
+    def push(tier: int, p: ProviderDef, model: str):
+        k = f"{p.name}/{model}"
         if k not in seen:
             seen.add(k)
-            chain.append((p, model))
+            tiers.append((tier, p, model))
 
-    # 1) Explicit pick from the UI.
+    # 0) Explicit pick from the UI.
     if preferred_id:
         prov_name, model = parse_model_id(preferred_id)
         if prov_name:
             p = get_provider(prov_name)
             if p and key_is_set(p):
-                push(p, model)
-    # 2) Uncensored keyed models first (Dolphin/Hermes carry the load when
+                push(0, p, model)
+    # 1) Uncensored keyed models first (Dolphin/Hermes carry the load when
     #    keys exist; they answer in seconds, not Horde-queue minutes).
     for p in KEYED_PROVIDERS:
         if p.uncensored and key_is_set(p):
             for m in p.models:
-                push(p, m)
-    # 3) Keyless reliability backstop.
+                push(1, p, m)
+    # 2) Keyless reliability backstop.
     for p in KEYLESS_PROVIDERS:
         for m in p.models:
-            push(p, m)
-    # 4) Remaining keyed providers with keys set.
+            push(2, p, m)
+    # 3) Remaining keyed providers with keys set.
     for p in KEYED_PROVIDERS:
         if not p.uncensored and key_is_set(p):
             for m in p.models:
-                push(p, m)
-    return chain
+                push(3, p, m)
+
+    if stats and _health_order_enabled():
+        by_leg = {(r.get("provider", ""), r.get("model", "")): r
+                  for r in stats}
+        # Stable sort: within (tier, penalty) the static relative order is
+        # preserved, so good legs never shuffle around.
+        tiers.sort(key=lambda t: (
+            t[0], _health_penalty(t[1].name, t[2], by_leg)))
+    return [(p, m) for _, p, m in tiers]

@@ -103,6 +103,10 @@ def probe(provider: str = "", model: str = "", access_code: str = ""):
     _check_access(access_code)
     from . import probe as probe_mod
     # Guardrails: bound the work so one HTTP call can't run for an hour.
+    known_providers = {p.name for p in providers_mod.ALL_PROVIDERS}
+    known_providers |= {"horde", "pollinations"}
+    if provider and provider not in known_providers:
+        raise HTTPException(status_code=400, detail="unknown provider")
     if model:
         allowed = {m["id"] for m in providers_mod.list_models()}
         if model not in allowed:

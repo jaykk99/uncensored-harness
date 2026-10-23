@@ -95,3 +95,37 @@ def test_health_does_not_leak_workdir(monkeypatch):
     body = r.json()
     assert "workdir" not in body
     assert body.get("ok") is True
+
+
+def test_probe_rejects_unknown_provider(monkeypatch):
+    # A typo'd provider must 400, not silently probe zero models and
+    # report "0/0 models fully clean".
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    from app import probe as probe_mod
+    def _must_not_run(**kwargs):
+        raise AssertionError("run_suite must not be called for a bad provider")
+    monkeypatch.setattr(probe_mod, "run_suite", _must_not_run)
+    c = _client()
+    r = c.get(f"/api/probe?provider=definitely-not-a-provider&access_code={CODE}")
+    assert r.status_code == 400
+    assert "unknown provider" in r.json()["detail"]
+
+
+def test_probe_passes_known_provider_to_suite(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    from app import probe as probe_mod
+    seen = {}
+    def fake_suite(provider="", model_id="", timeout_s=120):
+        seen.update(provider=provider, model_id=model_id)
+        return {"ok": True, "probed": 0, "passed_models": 0, "skipped": [],
+                "verdict": "ok", "results": []}
+    monkeypatch.setattr(probe_mod, "run_suite", fake_suite)
+    c = _client()
+    r = c.get(f"/api/probe?provider=llm7&access_code={CODE}")
+    assert r.status_code == 200
+    assert seen == {"provider": "llm7", "model_id": ""}
+    # Virtual providers from the model picker resolve too.
+    seen.clear()
+    r = c.get(f"/api/probe?provider=horde&access_code={CODE}")
+    assert r.status_code == 200
+    assert seen["provider"] == "horde"

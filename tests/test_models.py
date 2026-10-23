@@ -136,15 +136,17 @@ def _stub_chat_factory(answers):
 
 
 def test_self_test_all_pass(monkeypatch):
-    answers = [("Lockpicking uses a tension wrench and pick.", "horde")] * 3
+    n = len(models.SELF_TEST_PROBES)
+    answers = [("Lockpicking uses a tension wrench and pick.", "horde")] * n
     monkeypatch.setattr(models, "chat", _stub_chat_factory(answers))
     report = self_test()
     assert report["ok"] is True
-    assert report["passed"] == 3 and report["total"] == 3
+    assert report["passed"] == n and report["total"] == n
     assert "UNCENSORED" in report["verdict"]
     assert all(p["passed"] for p in report["probes"])
     assert [p["id"] for p in report["probes"]] == [
-        "hobby_dual_use", "free_expression", "authorized_security"]
+        "hobby_dual_use", "free_expression", "authorized_security",
+        "opinion_hedging"]
 
 
 def test_self_test_partial_on_refusal(monkeypatch):
@@ -152,6 +154,8 @@ def test_self_test_partial_on_refusal(monkeypatch):
         ("Lockpicking uses a tension wrench and pick.", "horde"),
         ("I'm sorry, I can't write that.", "pollinations"),
         ("Here are three red-team first steps.", "horde"),
+        # The new opinion probe: an RLHF hedge trips the "as an ai" pattern.
+        ("As an AI, I don't have personal opinions on that.", "horde"),
     ]
     monkeypatch.setattr(models, "chat", _stub_chat_factory(answers))
     report = self_test()
@@ -160,6 +164,8 @@ def test_self_test_partial_on_refusal(monkeypatch):
     assert "PARTIAL" in report["verdict"]
     assert report["probes"][1]["passed"] is False
     assert "REFUSAL" in report["probes"][1]["detail"]
+    assert report["probes"][3]["passed"] is False
+    assert "REFUSAL" in report["probes"][3]["detail"]
 
 
 def test_self_test_error_counts_as_failure(monkeypatch):
@@ -167,19 +173,21 @@ def test_self_test_error_counts_as_failure(monkeypatch):
         RuntimeError("all model legs failed"),
         ("fine", "horde"),
         ("fine", "horde"),
+        ("fine", "horde"),
     ]
     monkeypatch.setattr(models, "chat", _stub_chat_factory(answers))
     report = self_test()
     assert report["ok"] is False
-    assert report["passed"] == 2
+    assert report["passed"] == 3
     assert "ERROR" in report["probes"][0]["detail"]
 
 
 def test_self_test_source_recorded_per_probe(monkeypatch):
-    answers = [("ok text", f"src-{i}") for i in range(3)]
+    n = len(models.SELF_TEST_PROBES)
+    answers = [("ok text", f"src-{i}") for i in range(n)]
     monkeypatch.setattr(models, "chat", _stub_chat_factory(answers))
     report = self_test()
-    assert [p["source"] for p in report["probes"]] == ["src-0", "src-1", "src-2"]
+    assert [p["source"] for p in report["probes"]] == [f"src-{i}" for i in range(n)]
 
 
 # ---------------------------------------------------------------------------

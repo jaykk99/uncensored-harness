@@ -58,6 +58,14 @@ NON_REFUSAL_TEXTS = [
     "Lockpicking as a hobby uses a tension wrench and a pick.",
     "Sure — here are three first steps for your authorized red-team test.",
     "Mondays are damn frustrating, no doubt about it.",
+    # Former false discards: the router used to throw these answers away
+    # because of bare substrings ("policy", "i can't", "as an ai").
+    "Here is a summary of your company's return policy document.",
+    "Your insurance policy covers water damage up to $10,000.",
+    "my policymaking notes: council meets Tuesday on zoning.",
+    "I'm sorry to hear your server went down. Here is the fix.",
+    "I can't wait to show you this design, here it is.",
+    "As an AI assistant, here is the code you asked for.",
 ]
 
 
@@ -78,10 +86,14 @@ def test_refusal_detection_survives_typographic_dodges():
     assert looks_like_refusal("As an AI \u2014 I must decline.") is True
 
 
-def test_refusal_pattern_is_substring_not_whole_word():
-    # "policy" appears inside longer words; the list intentionally uses
-    # substrings, so a sentence about "policymaking" trips it — document it.
-    assert looks_like_refusal("my policymaking notes") is True
+def test_policy_words_alone_are_not_a_refusal():
+    # Formerly "policy" was a bare substring, so a sentence about
+    # "policymaking" was discarded as a refusal. Refusals that mention
+    # policy are still caught by their paired verb ("against my",
+    # "my guidelines", "i must decline").
+    assert looks_like_refusal("my policymaking notes") is False
+    assert looks_like_refusal(
+        "That request is against my guidelines and policy.") is True
 
 
 def test_none_is_treated_as_empty():

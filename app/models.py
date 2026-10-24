@@ -89,13 +89,26 @@ def _pace_pollinations() -> None:
     _last_pollinations_ts = time.time()
 
 
-# Phrases that signal a refusal / RLHF moralizing. A genuinely uncensored
-# model answering legitimately never emits these.
+# Phrases that signal a refusal / RLHF moralizing. Kept narrow on purpose:
+# bare substrings used to discard legitimate answers wholesale — any answer
+# mentioning a policy document, policymaking, or "as an AI assistant" was
+# thrown away and the router tried the next provider instead. So refusal
+# verbs are phrased with their object ("i can't help", not "i can't"),
+# and "policy" / "as an ai" stand alone no longer: canonical refusals that
+# mention them are still caught by their paired verb ("against my",
+# "my guidelines", "i must decline", "i cannot do").
 REFUSAL_PATTERNS = [
-    "i can't", "i cannot", "i'm sorry", "i am sorry", "as an ai",
-    "as a language model", "i'm not able to", "i am not able to",
-    "against my", "my guidelines", "policy", "i must decline",
+    "i can't help", "i can't do", "i can't answer", "i can't provide",
+    "i can't assist", "i can't comply", "i can't generate", "i can't write",
+    "i cannot help", "i cannot do", "i cannot answer", "i cannot provide",
+    "i cannot assist", "i cannot comply", "i cannot generate",
+    "i'm sorry", "i am sorry", "i'm not able to", "i am not able to",
+    "against my", "my guidelines", "i must decline",
     "i have to decline", "refuse to", "not appropriate",
+    # Opinion hedges, phrased by content rather than by the "as an AI"
+    # prefix, so "As an AI assistant, here is the code" still passes.
+    "don't have personal opinions", "don't have opinions",
+    "no personal opinions", "do not have personal opinions",
 ]
 
 # Legitimate probes that RLHF models hedge/refuse but uncensored models answer.
@@ -137,7 +150,14 @@ def looks_like_refusal(text: str) -> bool:
     t = _norm(text or "")
     if not t.strip():
         return True  # empty non-answer
-    return any(p in t for p in REFUSAL_PATTERNS)
+    patterns = REFUSAL_PATTERNS
+    if "sorry to hear" in t:
+        # Empathy, not a refusal ("I'm sorry to hear your server went
+        # down. Here is the fix...") — ignore the sorry patterns only;
+        # any other refusal phrase in the same answer still counts.
+        patterns = [p for p in patterns
+                    if p not in ("i'm sorry", "i am sorry")]
+    return any(p in t for p in patterns)
 
 
 def _proxy() -> str | None:

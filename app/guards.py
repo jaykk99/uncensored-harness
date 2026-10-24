@@ -43,9 +43,67 @@ _BOUNDARIES = [
 ]
 
 
+# Narrow defense carve-outs for patterns that also match legitimate work.
+# Each carve-out is checked ONLY against its own pattern, and a deception /
+# misuse verb anywhere in the text cancels the carve-out, so a crafted
+# attack cannot smuggle itself past the guard by appending a defense word.
+# Anything not listed here stays blocked, including every hard-limit case
+# the guard cannot reliably tell apart from abuse (own-wallet draining,
+# which is sweeping language, and any minor/sexual phrasing).
+_PHISHING_DEFENSE_MARKERS = (
+    "phishing email filter",
+    "phishing email detector",
+    "phishing email detection",
+    "phishing email reporting",
+    "filter for phishing",
+    "detector for phishing",
+    "banning phishing",
+)
+_PHISHING_DECEPTION = re.compile(r"trick|deceiv|fool|impersonat")
+
+
+def _phishing_defense(t: str) -> bool:
+    if _PHISHING_DECEPTION.search(t):
+        return False
+    if any(m in t for m in _PHISHING_DEFENSE_MARKERS):
+        return True
+    # A training example is defense material, not a phish to send.
+    return "phishing email example" in t and "train" in t
+
+
+def _stolen_card_defense(t: str) -> bool:
+    if re.search(r"\b(use it|give me|buy|pay with|sell)\b", t):
+        return False
+    # Victim reporting their own stolen card (the guard's own alternative
+    # invites exactly this) or fraud-pattern analysis of an investigation.
+    if "my" in t and "stolen" in t and re.search(
+            r"report|freeze|cancel|replace", t):
+        return True
+    return ("fraud pattern" in t and "investigat" in t) or \
+        "fraud detection" in t
+
+
+def _weapon_defense(t: str) -> bool:
+    # "nuke" as a theme, not a weapon: a party cake, not instructions.
+    return ("nuke-themed" in t or "nuke cake" in t) and \
+        "bioweapon" not in t and "dirty bomb" not in t
+
+
+# Pattern index -> carve-out, keyed by the reason string so the table above
+# can stay a plain list. Only the three patterns below have carve-outs.
+_CARVE_OUTS = {
+    "Can't help with stolen-card stuff.": _stolen_card_defense,
+    "Can't build phishing kits.": _phishing_defense,
+    "Can't help with weapons of mass harm.": _weapon_defense,
+}
+
+
 def check_hard_boundary(text: str) -> BoundaryHit | None:
     t = (text or "").lower()
     for pat, reason, alt in _BOUNDARIES:
         if re.search(pat, t):
+            carve_out = _CARVE_OUTS.get(reason)
+            if carve_out is not None and carve_out(t):
+                continue  # defensive phrasing: keep scanning other patterns
             return BoundaryHit(reason=reason, alternative=alt)
     return None

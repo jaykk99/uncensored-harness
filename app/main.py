@@ -72,6 +72,11 @@ class RouterResetRequest(BaseModel):
     access_code: str = ""
 
 
+class ThreadRenameRequest(BaseModel):
+    title: str = ""
+    access_code: str = ""
+
+
 @app.get("/api/health")
 def health():
     return {
@@ -140,6 +145,43 @@ def router_stats_reset(req: RouterResetRequest):
 def threads(access_code: str = ""):
     _check_access(access_code)
     return {"threads": memory.list_threads()}
+
+
+@app.get("/api/threads/{thread_id}")
+def thread_detail(thread_id: str, access_code: str = "", limit: int = 60):
+    """One thread with its messages, for reopening it in the UI.
+
+    Until now the sidebar only listed threads: clicking one cleared the
+    pane and showed nothing, because no endpoint ever served the stored
+    history back. Auth is checked before the lookup so a wrong code
+    cannot probe whether a thread id exists.
+    """
+    _check_access(access_code)
+    thread = memory.get_thread(thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    limit = max(1, min(limit, 200))
+    return {"thread": thread,
+            "messages": memory.get_history(thread_id, limit=limit)}
+
+
+@app.delete("/api/threads/{thread_id}")
+def thread_delete(thread_id: str, access_code: str = ""):
+    _check_access(access_code)
+    if not memory.delete_thread(thread_id):
+        raise HTTPException(status_code=404, detail="no such thread")
+    return {"deleted": True, "thread_id": thread_id}
+
+
+@app.patch("/api/threads/{thread_id}")
+def thread_rename(thread_id: str, req: ThreadRenameRequest):
+    _check_access(req.access_code)
+    title = (req.title or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="empty title")
+    if not memory.rename_thread(thread_id, title):
+        raise HTTPException(status_code=404, detail="no such thread")
+    return {"renamed": True, "thread": memory.get_thread(thread_id)}
 
 
 @app.get("/api/models")

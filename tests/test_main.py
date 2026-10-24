@@ -111,6 +111,82 @@ def test_probe_rejects_unknown_provider(monkeypatch):
     assert "unknown provider" in r.json()["detail"]
 
 
+def _thread_client(monkeypatch, tmp_path):
+    """TestClient with thread storage pointed at a tmp db."""
+    from app import memory
+    monkeypatch.setattr(memory, "DB", str(tmp_path / "threads.db"))
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    from app import memory as mem_mod
+    tid = mem_mod.create_thread("reopen me")
+    mem_mod.add_message(tid, "user", "first question")
+    mem_mod.add_message(tid, "assistant", "first answer")
+    return _client(), tid
+
+
+def test_thread_detail_requires_code(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/{tid}")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/{tid}?access_code=wrong")
+    assert r.status_code == 401
+
+
+def test_thread_detail_serves_history_in_order(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/{tid}?access_code={CODE}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["thread"]["id"] == tid
+    assert body["thread"]["title"] == "reopen me"
+    assert [(m["role"], m["content"]) for m in body["messages"]] == [
+        ("user", "first question"), ("assistant", "first answer")]
+
+
+def test_thread_detail_limit_clamped(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/{tid}?access_code={CODE}&limit=1")
+    assert len(r.json()["messages"]) == 1
+    assert r.json()["messages"][0]["content"] == "first answer"
+
+
+def test_thread_detail_unknown_is_404_not_auth_leak(monkeypatch, tmp_path):
+    c, _tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/nope-not-real?access_code={CODE}")
+    assert r.status_code == 404
+    # Wrong code still 401s first: existence is not leaked to strangers.
+    r = c.get("/api/threads/nope-not-real?access_code=wrong")
+    assert r.status_code == 401
+
+
+def test_thread_delete_removes_and_404s_after(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.delete(f"/api/threads/{tid}?access_code=wrong")
+    assert r.status_code == 401
+    r = c.delete(f"/api/threads/nope-not-real?access_code={CODE}")
+    assert r.status_code == 404
+    r = c.delete(f"/api/threads/{tid}?access_code={CODE}")
+    assert r.status_code == 200
+    assert r.json()["deleted"] is True
+    r = c.get(f"/api/threads/{tid}?access_code={CODE}")
+    assert r.status_code == 404
+
+
+def test_thread_rename_updates_list(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.patch(f"/api/threads/{tid}", json={"title": "  ", "access_code": CODE})
+    assert r.status_code == 400
+    r = c.patch("/api/threads/nope-not-real",
+                json={"title": "x", "access_code": CODE})
+    assert r.status_code == 404
+    r = c.patch(f"/api/threads/{tid}",
+                json={"title": "renamed thread", "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["thread"]["title"] == "renamed thread"
+    r = c.get(f"/api/threads?access_code={CODE}")
+    titles = [t["title"] for t in r.json()["threads"]]
+    assert "renamed thread" in titles
+
+
 def test_probe_passes_known_provider_to_suite(monkeypatch):
     monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
     from app import probe as probe_mod

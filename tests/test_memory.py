@@ -94,3 +94,36 @@ def test_history_default_limit(memdb):
     for i in range(70):
         memdb.add_message(tid, "user", f"m{i}")
     assert len(memdb.get_history(tid)) == 60
+
+
+def test_get_thread_and_unknown(memdb):
+    tid = memdb.create_thread("named")
+    got = memdb.get_thread(tid)
+    assert got["id"] == tid and got["title"] == "named"
+    assert isinstance(got["created"], float)
+    assert memdb.get_thread("nope-not-real") is None
+
+
+def test_delete_thread_removes_messages(memdb):
+    tid = memdb.create_thread("gone")
+    memdb.add_message(tid, "user", "hello")
+    assert memdb.delete_thread(tid) is True
+    assert memdb.thread_exists(tid) is False
+    assert memdb.get_history(tid) == []
+    assert memdb.get_thread(tid) is None
+    assert memdb.delete_thread(tid) is False
+
+
+def test_delete_thread_leaves_other_threads(memdb):
+    a = memdb.create_thread("a")
+    b = memdb.create_thread("b")
+    memdb.add_message(b, "user", "keep me")
+    assert memdb.delete_thread(a) is True
+    assert memdb.get_history(b)[0]["content"] == "keep me"
+
+
+def test_rename_thread_truncates_and_unknown(memdb):
+    tid = memdb.create_thread("old")
+    assert memdb.rename_thread(tid, "x" * 500) is True
+    assert memdb.get_thread(tid)["title"] == "x" * 60
+    assert memdb.rename_thread("nope-not-real", "new") is False

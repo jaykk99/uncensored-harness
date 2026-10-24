@@ -54,6 +54,42 @@ def get_history(tid: str, limit: int = 60) -> list[dict]:
     return [{"role": r, "content": co} for r, co in reversed(rows)]
 
 
+def get_thread(tid: str) -> dict | None:
+    c = _conn()
+    row = c.execute(
+        "SELECT id, title, created FROM threads WHERE id=?", (tid,)).fetchone()
+    c.close()
+    if not row:
+        return None
+    return {"id": row[0], "title": row[1], "created": row[2]}
+
+
+def delete_thread(tid: str) -> bool:
+    """Delete a thread and all its messages. Returns False if unknown."""
+    c = _conn()
+    cur = c.execute("DELETE FROM threads WHERE id=?", (tid,))
+    deleted = cur.rowcount > 0
+    if deleted:
+        c.execute("DELETE FROM messages WHERE thread_id=?", (tid,))
+    c.commit()
+    c.close()
+    return deleted
+
+
+def rename_thread(tid: str, title: str) -> bool:
+    """Rename a thread (title capped at 60 like create_thread).
+
+    Returns False if the thread does not exist.
+    """
+    c = _conn()
+    cur = c.execute("UPDATE threads SET title=? WHERE id=?",
+                    (title[:60], tid))
+    renamed = cur.rowcount > 0
+    c.commit()
+    c.close()
+    return renamed
+
+
 def list_threads() -> list[dict]:
     c = _conn()
     rows = c.execute(

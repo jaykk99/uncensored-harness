@@ -72,7 +72,7 @@ Gmail needs the one-time Google connect (OAuth consent with offline access) to m
 
 ## Capabilities
 
-- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar, model picker with live/keyless badges
+- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar (reopen a past thread with its full history, rename, delete), model picker with live/keyless badges
 - Terminal + filesystem, sandboxed to `HARNESS_WORKDIR` (default `~/harness-work`); path escapes rejected
 - Web search (Bing RSS primary, DuckDuckGo fallback) + fetch, with SSRF guards (no localhost/private IPs/metadata hosts)
 - Controlled headless browser (open/click/fill/text) with automatic screenshots (Playwright)
@@ -91,6 +91,9 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, avg/p50/p95 ms latency, `stale` flag when no data in 24h)
 - `GET /api/models` — model list grouped by provider, with live key status
 - `GET /api/threads` — list threads
+- `GET /api/threads/{id}` — reopen a thread with its stored messages (clicking a sidebar thread used to clear the pane and show nothing; this endpoint is what loads it back)
+- `DELETE /api/threads/{id}` — delete a thread and its messages
+- `PATCH /api/threads/{id}` — rename a thread (`{title, access_code}`)
 - `POST /api/chat` — SSE agent turn `{message, thread_id, access_code, model, web_search}`
 - `POST /api/run` — python/javascript code runner
 - `POST /api/shell` — terminal command
@@ -113,7 +116,7 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-172 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, and router stats. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
+214 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, router stats, and thread reopen/delete/rename. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
 
 ## Architecture
 

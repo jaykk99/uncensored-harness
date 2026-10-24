@@ -116,9 +116,14 @@
   #threads { flex: 1; overflow-y: auto; padding: 0 8px; display: flex; flex-direction: column; gap: 2px; }
   .thread { padding: 10px 12px; border-radius: 9px; cursor: pointer; font-size: 14px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim);
-    border: 1px solid transparent; }
+    border: 1px solid transparent; display: flex; align-items: center; gap: 4px; }
   .thread:hover { background: var(--panel2); color: var(--text); }
   .thread.active { background: var(--panel2); color: var(--text); border-color: var(--border); }
+  .thread .ttitle { flex: 1; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .thread .tbtn { display: none; background: none; border: 0; color: var(--dim);
+    cursor: pointer; font-size: 13px; padding: 2px 5px; border-radius: 6px; flex-shrink: 0; }
+  .thread:hover .tbtn { display: inline; }
+  .thread .tbtn:hover { color: var(--text); background: var(--panel); }
   #sidefoot { padding: 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--dim);
     display: flex; flex-direction: column; gap: 8px; }
   #routeinfo { font-size: 12px; }
@@ -1123,6 +1128,26 @@ document.querySelectorAll("#welcome .tip").forEach(t => {
 });
 
 /* ================= threads ================= */
+async function openThread(id) {
+  try {
+    const r = await fetch("/api/threads/" + encodeURIComponent(id) +
+      "?access_code=" + encodeURIComponent(AC));
+    if (!r.ok) { toast(r.status === 404 ? "That thread is gone." : "Could not open thread.", true); return; }
+    const d = await r.json();
+    threadId = d.thread.id;
+    chat.querySelectorAll(".msg").forEach(e => e.remove());
+    $("welcome").style.display = "none";
+    (d.messages || []).forEach(m => {
+      if (m.role === "user") { addUser(m.content); return; }
+      const bubble = newAssistant();
+      bubble.innerHTML = renderMarkdown(m.content);
+      decorateCodeBlocks(bubble);
+      addPreviewButtons(bubble);
+    });
+    chat.scrollTop = chat.scrollHeight;
+    loadThreads(); closeDrawer();
+  } catch (e) { toast("Could not open thread.", true); }
+}
 async function loadThreads() {
   if (!AC) return;
   try {
@@ -1133,13 +1158,41 @@ async function loadThreads() {
     (d.threads || []).forEach(t => {
       const el = document.createElement("div");
       el.className = "thread" + (t.id === threadId ? " active" : "");
-      el.textContent = t.title || "untitled";
-      el.onclick = () => {
-        threadId = t.id;
-        chat.querySelectorAll(".msg").forEach(e => e.remove());
-        $("welcome").style.display = "none";
-        loadThreads(); closeDrawer();
+      const title = document.createElement("span");
+      title.className = "ttitle";
+      title.textContent = t.title || "untitled";
+      title.onclick = () => openThread(t.id);
+      el.appendChild(title);
+      const ren = document.createElement("button");
+      ren.className = "tbtn"; ren.textContent = "\u270e"; ren.title = "Rename thread";
+      ren.onclick = async e => {
+        e.stopPropagation();
+        const next = prompt("Rename thread", t.title || "");
+        if (next === null) return;
+        if (!next.trim()) { toast("Title cannot be empty.", true); return; }
+        try {
+          const rr = await fetch("/api/threads/" + encodeURIComponent(t.id), {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: next.trim(), access_code: AC }) });
+          if (!rr.ok) throw new Error("rename failed");
+          loadThreads();
+        } catch (err) { toast("Rename failed.", true); }
       };
+      el.appendChild(ren);
+      const del = document.createElement("button");
+      del.className = "tbtn"; del.textContent = "\u00d7"; del.title = "Delete thread";
+      del.onclick = async e => {
+        e.stopPropagation();
+        if (!confirm("Delete this thread and all its messages?")) return;
+        try {
+          const rr = await fetch("/api/threads/" + encodeURIComponent(t.id) +
+            "?access_code=" + encodeURIComponent(AC), { method: "DELETE" });
+          if (!rr.ok) throw new Error("delete failed");
+          if (threadId === t.id) { threadId = ""; newChat(); }
+          loadThreads();
+        } catch (err) { toast("Delete failed.", true); }
+      };
+      el.appendChild(del);
       box.appendChild(el);
     });
   } catch (e) { /* offline */ }

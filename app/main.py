@@ -147,6 +147,18 @@ def threads(access_code: str = ""):
     return {"threads": memory.list_threads()}
 
 
+@app.get("/api/threads/search")
+def thread_search(q: str = "", access_code: str = ""):
+    """Search thread titles and message content.
+
+    Registered before /api/threads/{thread_id} so "search" is never
+    treated as a thread id. Auth is checked before the lookup, same as
+    the other thread endpoints.
+    """
+    _check_access(access_code)
+    return {"threads": memory.search_threads(q)}
+
+
 @app.get("/api/threads/{thread_id}")
 def thread_detail(thread_id: str, access_code: str = "", limit: int = 60):
     """One thread with its messages, for reopening it in the UI.

@@ -96,3 +96,44 @@ def list_threads() -> list[dict]:
         "SELECT id, title, created FROM threads ORDER BY created DESC LIMIT 50").fetchall()
     c.close()
     return [{"id": r[0], "title": r[1], "created": r[2]} for r in rows]
+
+
+def search_threads(query: str, limit: int = 20) -> list[dict]:
+    """Find threads by title or message content.
+
+    The sidebar only lists the newest 50 threads, so anything older was
+    unreachable. A hit returns the thread plus a short excerpt of a
+    matching message, so the user can tell *why* it matched before
+    opening it. LIKE wildcards in the query are escaped: a literal "%"
+    in the search text must not match everything.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pat = f"%{esc}%"
+    limit = max(1, min(limit, 50))
+    c = _conn()
+    rows = c.execute(
+        """SELECT t.id, t.title, t.created, m.content
+             FROM threads t JOIN messages m ON m.thread_id = t.id
+            WHERE t.title LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\'
+            ORDER BY m.created DESC""",
+        (pat, pat)).fetchall()
+    c.close()
+    seen: dict[str, dict] = {}
+    for tid, title, created, content in rows:
+        if tid in seen:
+            continue
+        idx = content.lower().find(q.lower())
+        if idx < 0:
+            snippet = (title or "")[:120]
+        else:
+            start = max(0, idx - 40)
+            snippet = content[start:idx + len(q) + 80].replace("\n", " ")
+            snippet = ("..." if start > 0 else "") + snippet
+        seen[tid] = {"id": tid, "title": title, "created": created,
+                     "snippet": snippet}
+        if len(seen) >= limit:
+            break
+    return list(seen.values())

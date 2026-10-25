@@ -127,3 +127,61 @@ def test_rename_thread_truncates_and_unknown(memdb):
     assert memdb.rename_thread(tid, "x" * 500) is True
     assert memdb.get_thread(tid)["title"] == "x" * 60
     assert memdb.rename_thread("nope-not-real", "new") is False
+
+
+def test_search_matches_title(memdb):
+    tid = memdb.create_thread("deploy railway notes")
+    memdb.add_message(tid, "user", "unrelated chatter")
+    hits = memdb.search_threads("railway")
+    assert [h["id"] for h in hits] == [tid]
+    assert "railway" in hits[0]["snippet"].lower()
+
+
+def test_search_matches_message_content_case_insensitive(memdb):
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "the QUOTA script broke again")
+    other = memdb.create_thread("u")
+    memdb.add_message(other, "user", "nothing relevant")
+    hits = memdb.search_threads("quota")
+    assert [h["id"] for h in hits] == [tid]
+    assert "quota" in hits[0]["snippet"].lower()
+
+
+def test_search_dedupes_thread_with_many_matching_messages(memdb):
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "banana one")
+    memdb.add_message(tid, "user", "banana two")
+    assert len(memdb.search_threads("banana")) == 1
+
+
+def test_search_empty_and_no_match(memdb):
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "hello")
+    assert memdb.search_threads("") == []
+    assert memdb.search_threads("   ") == []
+    assert memdb.search_threads("zzz-no-match") == []
+
+
+def test_search_escapes_like_wildcards(memdb):
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "100% sure")
+    memdb.add_message(tid, "user", "plain text")
+    # A literal "%" must not match every message in the thread.
+    hits = memdb.search_threads("%")
+    assert len(hits) == 1 and hits[0]["id"] == tid
+    assert "%" in hits[0]["snippet"]
+    assert memdb.search_threads("_") == []
+
+
+def test_search_limit_and_shape(memdb):
+    ids = []
+    for i in range(25):
+        tid = memdb.create_thread(f"t-{i}")
+        memdb.add_message(tid, "user", "commonword here")
+        ids.append(tid)
+    hits = memdb.search_threads("commonword")
+    assert len(hits) == 20  # default limit
+    assert set(hits[0]) == {"id", "title", "created", "snippet"}
+    limited = memdb.search_threads("commonword", limit=3)
+    assert len(limited) == 3
+    assert [h["id"] for h in limited] == [h["id"] for h in hits[:3]]

@@ -205,3 +205,31 @@ def test_probe_passes_known_provider_to_suite(monkeypatch):
     r = c.get(f"/api/probe?provider=horde&access_code={CODE}")
     assert r.status_code == 200
     assert seen["provider"] == "horde"
+
+
+def test_thread_search_requires_code(monkeypatch, tmp_path):
+    c, _tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get("/api/threads/search?q=first")
+    assert r.status_code == 401
+    r = c.get("/api/threads/search?q=first&access_code=wrong")
+    assert r.status_code == 401
+
+
+def test_thread_search_finds_by_content_and_title(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/search?q=first+question&access_code={CODE}")
+    assert r.status_code == 200
+    hits = r.json()["threads"]
+    assert [h["id"] for h in hits] == [tid]
+    assert "first question" in hits[0]["snippet"]
+    r = c.get(f"/api/threads/search?q=reopen&access_code={CODE}")
+    assert [h["id"] for h in r.json()["threads"]] == [tid]
+    r = c.get(f"/api/threads/search?q=zzz-no-match&access_code={CODE}")
+    assert r.json()["threads"] == []
+
+
+def test_thread_search_route_is_not_a_thread_id(monkeypatch, tmp_path):
+    # "search" must hit the search endpoint, not thread_detail's 404.
+    c, _tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/search?q=first&access_code={CODE}")
+    assert r.status_code == 200

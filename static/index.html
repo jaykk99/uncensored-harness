@@ -113,6 +113,10 @@
   #newchat { margin: 0 12px 10px; padding: 10px; background: var(--accent); color: #fff;
     border: 0; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; }
   #newchat:hover { background: var(--accent2); }
+  #threadsearch { margin: 0 12px 8px; padding: 8px 10px; background: var(--panel2);
+    color: var(--text); border: 1px solid var(--border); border-radius: 9px; font-size: 13px; }
+  .thread .tsnip { font-size: 12px; color: var(--dim); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
   #threads { flex: 1; overflow-y: auto; padding: 0 8px; display: flex; flex-direction: column; gap: 2px; }
   .thread { padding: 10px 12px; border-radius: 9px; cursor: pointer; font-size: 14px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dim);
@@ -430,6 +434,7 @@
   <div id="sidebar">
     <h2>Chats</h2>
     <button id="newchat">+ New chat</button>
+    <input id="threadsearch" type="text" placeholder="Search chats..." autocomplete="off">
     <div id="threads"></div>
     <div id="sidefoot">
       <div id="routeinfo">last route: <b>not run yet</b></div>
@@ -1153,16 +1158,30 @@ async function loadThreads() {
   try {
     const r = await fetch("/api/threads?access_code=" + encodeURIComponent(AC));
     const d = await r.json();
+    renderThreads(d.threads || []);
+  } catch (e) { /* offline */ }
+}
+function renderThreads(list) {
     const box = $("threads");
     box.innerHTML = "";
-    (d.threads || []).forEach(t => {
+    list.forEach(t => {
       const el = document.createElement("div");
       el.className = "thread" + (t.id === threadId ? " active" : "");
+      const col = document.createElement("div");
+      col.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;";
       const title = document.createElement("span");
       title.className = "ttitle";
       title.textContent = t.title || "untitled";
       title.onclick = () => openThread(t.id);
-      el.appendChild(title);
+      col.appendChild(title);
+      if (t.snippet) {
+        const sn = document.createElement("span");
+        sn.className = "tsnip";
+        sn.textContent = t.snippet;
+        sn.onclick = () => openThread(t.id);
+        col.appendChild(sn);
+      }
+      el.appendChild(col);
       const ren = document.createElement("button");
       ren.className = "tbtn"; ren.textContent = "\u270e"; ren.title = "Rename thread";
       ren.onclick = async e => {
@@ -1195,8 +1214,22 @@ async function loadThreads() {
       el.appendChild(del);
       box.appendChild(el);
     });
-  } catch (e) { /* offline */ }
 }
+/* Sidebar thread search: debounced, falls back to the full list on empty. */
+let threadSearchTimer = null;
+$("threadsearch").addEventListener("input", e => {
+  const q = e.target.value.trim();
+  clearTimeout(threadSearchTimer);
+  if (!q) { loadThreads(); return; }
+  threadSearchTimer = setTimeout(async () => {
+    try {
+      const r = await fetch("/api/threads/search?q=" + encodeURIComponent(q) +
+        "&access_code=" + encodeURIComponent(AC));
+      const d = await r.json();
+      renderThreads(d.threads || []);
+    } catch (err) { /* offline */ }
+  }, 250);
+});
 /* ================= image generation (Pollinations, free) ================= */
 const imgprompt = $("imgprompt"), genbtn = $("genbtn"), imgresults = $("imgresults");
 const imgratio = $("imgratio"), imgmodel = $("imgmodel");

@@ -769,7 +769,7 @@ modeImage.onclick = () => showView("image");
 modeSys.onclick = () => showView("sys");
 termbtn.onclick = () => showView(curView === "term" ? "chat" : "term");
 $("newchatbtn").onclick = () => { newChat(); showView("chat"); };
-function newChat() { threadId = ""; $("chat").querySelectorAll(".msg").forEach(e => e.remove()); $("welcome").style.display = ""; }
+function newChat() { threadId = ""; $("chat").querySelectorAll(".msg").forEach(e => e.remove()); const lb = $("loadolderbtn"); if (lb) lb.remove(); $("welcome").style.display = ""; }
 
 /* mobile drawer */
 const sidebar = $("sidebar"), scrim = $("scrim");
@@ -1133,6 +1133,51 @@ document.querySelectorAll("#welcome .tip").forEach(t => {
 });
 
 /* ================= threads ================= */
+/* Long threads page in: openThread shows the newest 60, and a
+   "Load older messages" button above them pages backwards through
+   /api/threads/{id}?offset= until the whole thread is on screen.
+   Previously anything older than 60 messages was silently unreachable
+   on reopen. The button is not a .msg, so newChat()'s cleanup leaves
+   it alone — openThread removes any stale one up front. */
+function loadOlderBtn(total, shown) {
+  const old = $("loadolderbtn");
+  if (old) old.remove();
+  if (!total || shown >= total) return;
+  const b = document.createElement("button");
+  b.id = "loadolderbtn"; b.className = "pbtn";
+  b.style.cssText = "display:block;margin:0 auto 12px;";
+  b.textContent = "Load older messages (" + (total - shown) + " more)";
+  b.onclick = async () => {
+    b.disabled = true; b.textContent = "Loading...";
+    try {
+      const shownNow = chat.querySelectorAll(".msg").length;
+      const r = await fetch("/api/threads/" + encodeURIComponent(threadId) +
+        "?access_code=" + encodeURIComponent(AC) + "&offset=" + shownNow);
+      if (!r.ok) throw new Error("load failed");
+      const d = await r.json();
+      const older = d.messages || [];
+      const anchor = chat.querySelector(".msg");
+      const beforeH = chat.scrollHeight;
+      older.forEach(m => {
+        if (m.role === "user") { addUser(m.content); }
+        else {
+          const bubble = newAssistant();
+          bubble.innerHTML = renderMarkdown(m.content);
+          decorateCodeBlocks(bubble);
+          addPreviewButtons(bubble);
+        }
+        // addUser/newAssistant append at the bottom; move the new
+        // message up before the previously-oldest one, in order.
+        chat.insertBefore(chat.lastElementChild, anchor);
+      });
+      chat.scrollTop = chat.scrollHeight - beforeH;
+      loadOlderBtn(d.total, chat.querySelectorAll(".msg").length);
+    } catch (e) { toast("Could not load older messages.", true); b.disabled = false; }
+  };
+  const firstMsg = chat.querySelector(".msg");
+  if (firstMsg) chat.insertBefore(b, firstMsg);
+  else chat.appendChild(b);
+}
 async function openThread(id) {
   try {
     const r = await fetch("/api/threads/" + encodeURIComponent(id) +
@@ -1141,6 +1186,8 @@ async function openThread(id) {
     const d = await r.json();
     threadId = d.thread.id;
     chat.querySelectorAll(".msg").forEach(e => e.remove());
+    const staleBtn = $("loadolderbtn");
+    if (staleBtn) staleBtn.remove();
     $("welcome").style.display = "none";
     (d.messages || []).forEach(m => {
       if (m.role === "user") { addUser(m.content); return; }
@@ -1149,6 +1196,7 @@ async function openThread(id) {
       decorateCodeBlocks(bubble);
       addPreviewButtons(bubble);
     });
+    loadOlderBtn(d.total, (d.messages || []).length);
     chat.scrollTop = chat.scrollHeight;
     loadThreads(); closeDrawer();
   } catch (e) { toast("Could not open thread.", true); }

@@ -45,13 +45,35 @@ def add_message(tid: str, role: str, content: str) -> None:
     c.close()
 
 
-def get_history(tid: str, limit: int = 60) -> list[dict]:
+def get_history(tid: str, limit: int = 60, offset: int = 0) -> list[dict]:
+    """Most recent messages, oldest-first within the page.
+
+    Reopening a thread used to fetch only the newest 60 messages with no
+    way back: anything older was silently unreachable in the UI. `offset`
+    pages backwards through history (offset = how many of the newest
+    messages to skip), so the UI can offer "load older messages" until
+    the whole thread is on screen. Shape stays {role, content} only —
+    this history is also fed to the model, which needs strict OpenAI
+    message format, so no id or metadata keys may be added here.
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
     c = _conn()
     rows = c.execute(
-        "SELECT role, content FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT ?",
-        (tid, limit)).fetchall()
+        "SELECT role, content FROM messages WHERE thread_id=? "
+        "ORDER BY id DESC LIMIT ? OFFSET ?",
+        (tid, limit, offset)).fetchall()
     c.close()
     return [{"role": r, "content": co} for r, co in reversed(rows)]
+
+
+def count_messages(tid: str) -> int:
+    """Total messages in a thread, for paging decisions in the UI."""
+    c = _conn()
+    row = c.execute(
+        "SELECT COUNT(*) FROM messages WHERE thread_id=?", (tid,)).fetchone()
+    c.close()
+    return int(row[0]) if row else 0
 
 
 def get_thread(tid: str) -> dict | None:

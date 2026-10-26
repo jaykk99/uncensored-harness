@@ -149,6 +149,28 @@ def test_thread_detail_limit_clamped(monkeypatch, tmp_path):
     assert r.json()["messages"][0]["content"] == "first answer"
 
 
+def test_thread_detail_offset_pages_and_reports_total(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(3):
+        memory.add_message(tid, "user", f"extra-{i}")
+    body = c.get(f"/api/threads/{tid}?access_code={CODE}").json()
+    assert body["total"] == 5
+    assert [m["content"] for m in body["messages"]] == [
+        "first question", "first answer", "extra-0", "extra-1", "extra-2"]
+    older = c.get(
+        f"/api/threads/{tid}?access_code={CODE}&limit=2&offset=2").json()
+    assert older["total"] == 5
+    assert [m["content"] for m in older["messages"]] == [
+        "first answer", "extra-0"]
+    assert c.get(
+        f"/api/threads/{tid}?access_code={CODE}&offset=99").json()["messages"] == []
+    # Negative offset clamps to the newest page, like limit does.
+    newest = c.get(
+        f"/api/threads/{tid}?access_code={CODE}&offset=-3").json()
+    assert [m["content"] for m in newest["messages"]][-1] == "extra-2"
+
+
 def test_thread_detail_unknown_is_404_not_auth_leak(monkeypatch, tmp_path):
     c, _tid = _thread_client(monkeypatch, tmp_path)
     r = c.get(f"/api/threads/nope-not-real?access_code={CODE}")

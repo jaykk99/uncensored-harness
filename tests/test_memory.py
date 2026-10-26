@@ -96,6 +96,32 @@ def test_history_default_limit(memdb):
     assert len(memdb.get_history(tid)) == 60
 
 
+def test_history_offset_pages_backwards(memdb):
+    tid = memdb.create_thread("t")
+    for i in range(10):
+        memdb.add_message(tid, "user", f"m{i}")
+    # Newest page, then the older page: together they cover the thread
+    # exactly once, in order, with no overlap or gap.
+    newest = [m["content"] for m in memdb.get_history(tid, limit=4)]
+    older = [m["content"] for m in memdb.get_history(tid, limit=4, offset=4)]
+    oldest = [m["content"] for m in memdb.get_history(tid, limit=4, offset=8)]
+    assert newest == ["m6", "m7", "m8", "m9"]
+    assert older == ["m2", "m3", "m4", "m5"]
+    assert oldest == ["m0", "m1"]
+    assert memdb.get_history(tid, limit=4, offset=10) == []
+    # Negative offsets clamp to 0: same as the newest page.
+    assert [m["content"] for m in memdb.get_history(tid, limit=4, offset=-5)] == newest
+
+
+def test_count_messages(memdb):
+    tid = memdb.create_thread("t")
+    assert memdb.count_messages(tid) == 0
+    memdb.add_message(tid, "user", "one")
+    memdb.add_message(tid, "assistant", "two")
+    assert memdb.count_messages(tid) == 2
+    assert memdb.count_messages("nope-not-real") == 0
+
+
 def test_get_thread_and_unknown(memdb):
     tid = memdb.create_thread("named")
     got = memdb.get_thread(tid)

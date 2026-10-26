@@ -160,21 +160,28 @@ def thread_search(q: str = "", access_code: str = ""):
 
 
 @app.get("/api/threads/{thread_id}")
-def thread_detail(thread_id: str, access_code: str = "", limit: int = 60):
+def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
+                  offset: int = 0):
     """One thread with its messages, for reopening it in the UI.
 
     Until now the sidebar only listed threads: clicking one cleared the
     pane and showed nothing, because no endpoint ever served the stored
     history back. Auth is checked before the lookup so a wrong code
     cannot probe whether a thread id exists.
+    `offset` pages backwards (skip that many of the newest messages) so
+    a thread longer than `limit` can be read in full; `total` tells the
+    UI whether older messages remain.
     """
     _check_access(access_code)
     thread = memory.get_thread(thread_id)
     if thread is None:
         raise HTTPException(status_code=404, detail="no such thread")
     limit = max(1, min(limit, 200))
+    offset = max(0, offset)
     return {"thread": thread,
-            "messages": memory.get_history(thread_id, limit=limit)}
+            "messages": memory.get_history(thread_id, limit=limit,
+                                           offset=offset),
+            "total": memory.count_messages(thread_id)}
 
 
 @app.delete("/api/threads/{thread_id}")

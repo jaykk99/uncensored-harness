@@ -1,3 +1,5 @@
+Live: https://uncensored-harness-production.up.railway.app/
+
 # Uncensored Harness
 
 Standalone AI agent harness with **verified uncensored models only** — never GPT, Claude, Gemini, or any RLHF-tuned refuser.

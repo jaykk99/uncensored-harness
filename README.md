@@ -85,6 +85,10 @@ Gmail needs the one-time Google connect (OAuth consent with offline access) to m
 ## API endpoints
 
 All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS_CODE` is set.
+Wrong codes are rate-limited per IP (`app/rate_limit.py`): 10 failures inside
+10 minutes locks that IP out for 15 minutes (`429`), since nearly every
+endpoint below can run shell/code or spend a connected service's token —
+guessing the code had no cost before this.
 
 - `GET /` — chat UI
 - `GET /api/health` — liveness, routing summary, integration status

@@ -10,9 +10,24 @@ from __future__ import annotations
 
 import os
 
-from app import tools as T
+import pytest
+
+from app import rate_limit, tools as T
 
 CODE = "secret123"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit():
+    """app/rate_limit.py's failure counters are module-level globals, and
+    TestClient reuses one IP across every test in this process. Several
+    tests below deliberately send wrong codes; without resetting between
+    tests, enough of them accumulate to trip the real lockout (by design,
+    after MAX_FAILURES wrong attempts) and a later, unrelated test would
+    get 429 instead of the 401/200 it actually expects."""
+    rate_limit.reset_all()
+    yield
+    rate_limit.reset_all()
 
 
 def _client():
@@ -295,3 +310,53 @@ def test_thread_export_guards(monkeypatch, tmp_path):
     assert r.status_code == 404
     r = c.get(f"/api/threads/{tid}/export?format=pdf&access_code={CODE}")
     assert r.status_code == 400
+
+
+def test_too_many_wrong_codes_locks_out_429(monkeypatch):
+    """Regression: /api/* had an access-code gate but no limit at all on
+    how many times it could be guessed -- these endpoints run shell/code
+    or spend a connected service's token, so unlimited free guessing was
+    a real brute-force surface."""
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    monkeypatch.setattr(rate_limit, "MAX_FAILURES", 3)
+    c = _client()
+    for _ in range(3):
+        r = c.get("/api/threads?access_code=wrong")
+        assert r.status_code == 401
+    r = c.get("/api/threads?access_code=wrong")
+    assert r.status_code == 429
+    assert "try again" in r.json()["detail"]
+    # Locked out even with the RIGHT code now -- the lockout is per-IP,
+    # not per-attempt-correctness, or it would be trivially bypassable by
+    # alternating a guess with a throwaway correct-looking request.
+    r = c.get(f"/api/threads?access_code={CODE}")
+    assert r.status_code == 429
+
+
+def test_correct_code_clears_the_failure_count(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    monkeypatch.setattr(rate_limit, "MAX_FAILURES", 3)
+    c = _client()
+    r = c.get("/api/threads?access_code=wrong")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads?access_code={CODE}")
+    assert r.status_code == 200
+    # The one earlier failure should not carry over after a success.
+    r = c.get("/api/threads?access_code=wrong")
+    assert r.status_code == 401
+    r = c.get("/api/threads?access_code=wrong")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads?access_code={CODE}")
+    assert r.status_code == 200  # still under MAX_FAILURES=3, not locked
+
+
+def test_gate_off_never_locks_out(monkeypatch):
+    """With no HARNESS_ACCESS_CODE set, every request is open (the
+    documented "empty = open" mode) -- the rate limiter must never kick
+    in when there's no code to guess in the first place."""
+    monkeypatch.delenv("HARNESS_ACCESS_CODE", raising=False)
+    monkeypatch.setattr(rate_limit, "MAX_FAILURES", 3)
+    c = _client()
+    for _ in range(10):
+        r = c.get("/api/threads?access_code=whatever")
+        assert r.status_code == 200

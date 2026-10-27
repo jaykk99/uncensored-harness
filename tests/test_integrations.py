@@ -75,6 +75,29 @@ def fake_http(monkeypatch):
     return routes, clients
 
 
+_CRED_VARS = (
+    "GITHUB_TOKEN", "GITLAB_TOKEN", "GITLAB_HOST",
+    "GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN",
+    "VERCEL_TOKEN", "VERCEL_TEAM_ID", "FAL_KEY",
+)
+
+
+@pytest.fixture(autouse=True)
+def clean_credential_env(monkeypatch):
+    """Clear every integration credential before each test.
+
+    The *_not_connected_message tests below assert the "not connected"
+    path specifically, which only holds when these vars are genuinely
+    unset -- without this, a GITHUB_TOKEN (or similar) already present in
+    whatever environment runs the suite (CI, a dev shell with `gh` set up,
+    this repo's own sandbox) silently flips that test to the "connected"
+    branch and it fails with an unrelated-looking network-call assertion.
+    Individual tests still opt in to a credential via gh_env/gl_env/etc.
+    """
+    for name in _CRED_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def gh_env(monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "gh-test")

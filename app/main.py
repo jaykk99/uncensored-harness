@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from . import agent as agent_mod
 from . import integrations, memory, models
 from . import providers as providers_mod
+from . import rate_limit
 from . import tools as T
 from .guards import check_hard_boundary
 
@@ -43,10 +44,32 @@ def _access_code() -> str:
     return os.environ.get("HARNESS_ACCESS_CODE", "").strip()
 
 
-def _check_access(provided: str) -> None:
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_access(request: Request, provided: str) -> None:
+    """Gate behind HARNESS_ACCESS_CODE, with a per-IP lockout on repeated
+    wrong guesses (see app/rate_limit.py) -- every endpoint this gates can
+    run shell/code or use a connected service's token, so unlimited free
+    guessing was a real brute-force surface, not just a theoretical one.
+    """
+    ip = _client_ip(request)
+    locked_for = rate_limit.is_locked(ip)
+    if locked_for > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"too many wrong access codes; try again in {int(locked_for)}s",
+        )
     required = _access_code()
     if required and provided != required:
+        rate_limit.record_failure(ip)
         raise HTTPException(status_code=401, detail="wrong access code")
+    if required:
+        rate_limit.clear(ip)
 
 
 class ChatRequest(BaseModel):
@@ -94,20 +117,20 @@ def health():
 
 
 @app.get("/api/self-test")
-def self_test(access_code: str = ""):
-    _check_access(access_code)
+def self_test(request: Request, access_code: str = ""):
+    _check_access(request, access_code)
     return models.self_test()
 
 
 @app.get("/api/probe")
-def probe(provider: str = "", model: str = "", access_code: str = ""):
+def probe(request: Request, provider: str = "", model: str = "", access_code: str = ""):
     """Per-provider uncensored probe suite (slow — hits live providers).
 
     Probes each live model individually with the refusal probes and
     reports PASS/FAIL per model. A model may only be called 'uncensored'
     after passing every probe here.
     """
-    _check_access(access_code)
+    _check_access(request, access_code)
     from . import probe as probe_mod
     # Guardrails: bound the work so one HTTP call can't run for an hour.
     known_providers = {p.name for p in providers_mod.ALL_PROVIDERS}
@@ -122,47 +145,47 @@ def probe(provider: str = "", model: str = "", access_code: str = ""):
 
 
 @app.get("/api/router-stats")
-def router_stats(access_code: str = ""):
+def router_stats(request: Request, access_code: str = ""):
     """Per-leg routing health: attempts/successes/refusals/errors + latency."""
-    _check_access(access_code)
+    _check_access(request, access_code)
     from . import router_stats as rs_mod
     return {"health": rs_mod.health(), "legs": rs_mod.snapshot()}
 
 
 @app.post("/api/router-stats/reset")
-def router_stats_reset(req: RouterResetRequest):
+def router_stats_reset(request: Request, req: RouterResetRequest):
     """Clear router leg stats (all, or one provider/model).
 
     Stale stats drag the health table down long after a provider outage
     is fixed; this gives the System tab a clean slate. The stats rebuild
     naturally as new turns run.
     """
-    _check_access(req.access_code)
+    _check_access(request, req.access_code)
     from . import router_stats as rs_mod
     n = rs_mod.reset(provider=req.provider, model=req.model)
     return {"cleared": n}
 
 
 @app.get("/api/threads")
-def threads(access_code: str = ""):
-    _check_access(access_code)
+def threads(request: Request, access_code: str = ""):
+    _check_access(request, access_code)
     return {"threads": memory.list_threads()}
 
 
 @app.get("/api/threads/search")
-def thread_search(q: str = "", access_code: str = ""):
+def thread_search(request: Request, q: str = "", access_code: str = ""):
     """Search thread titles and message content.
 
     Registered before /api/threads/{thread_id} so "search" is never
     treated as a thread id. Auth is checked before the lookup, same as
     the other thread endpoints.
     """
-    _check_access(access_code)
+    _check_access(request, access_code)
     return {"threads": memory.search_threads(q)}
 
 
 @app.get("/api/threads/{thread_id}")
-def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
+def thread_detail(request: Request, thread_id: str, access_code: str = "", limit: int = 60,
                   offset: int = 0):
     """One thread with its messages, for reopening it in the UI.
 
@@ -174,7 +197,7 @@ def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
     a thread longer than `limit` can be read in full; `total` tells the
     UI whether older messages remain.
     """
-    _check_access(access_code)
+    _check_access(request, access_code)
     thread = memory.get_thread(thread_id)
     if thread is None:
         raise HTTPException(status_code=404, detail="no such thread")
@@ -212,7 +235,7 @@ def _thread_markdown(thread: dict, messages: list[dict]) -> str:
 
 
 @app.get("/api/threads/{thread_id}/export")
-def thread_export(thread_id: str, format: str = "md",
+def thread_export(request: Request, thread_id: str, format: str = "md",
                   access_code: str = ""):
     """Download a whole thread: Markdown transcript (default) or JSON.
 
@@ -222,7 +245,7 @@ def thread_export(thread_id: str, format: str = "md",
     checked before the lookup so a wrong code cannot probe whether a
     thread id exists.
     """
-    _check_access(access_code)
+    _check_access(request, access_code)
     thread = memory.get_thread(thread_id)
     if thread is None:
         raise HTTPException(status_code=404, detail="no such thread")
@@ -243,16 +266,16 @@ def thread_export(thread_id: str, format: str = "md",
 
 
 @app.delete("/api/threads/{thread_id}")
-def thread_delete(thread_id: str, access_code: str = ""):
-    _check_access(access_code)
+def thread_delete(request: Request, thread_id: str, access_code: str = ""):
+    _check_access(request, access_code)
     if not memory.delete_thread(thread_id):
         raise HTTPException(status_code=404, detail="no such thread")
     return {"deleted": True, "thread_id": thread_id}
 
 
 @app.patch("/api/threads/{thread_id}")
-def thread_rename(thread_id: str, req: ThreadRenameRequest):
-    _check_access(req.access_code)
+def thread_rename(request: Request, thread_id: str, req: ThreadRenameRequest):
+    _check_access(request, req.access_code)
     title = (req.title or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="empty title")
@@ -262,8 +285,8 @@ def thread_rename(thread_id: str, req: ThreadRenameRequest):
 
 
 @app.get("/api/models")
-def api_models(access_code: str = ""):
-    _check_access(access_code)
+def api_models(request: Request, access_code: str = ""):
+    _check_access(request, access_code)
     from . import providers as providers_mod
     models = providers_mod.list_models()
     groups: dict[str, dict] = {}
@@ -285,8 +308,8 @@ def index():
 
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
-    _check_access(req.access_code)
+async def chat(request: Request, req: ChatRequest):
+    _check_access(request, req.access_code)
     message = (req.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="empty message")
@@ -376,9 +399,9 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/api/run")
-async def run_code(req: RunRequest):
+async def run_code(request: Request, req: RunRequest):
     """Built-in code runner: python or javascript. Returns stdout/stderr."""
-    _check_access(req.access_code)
+    _check_access(request, req.access_code)
     lang = (req.language or "python").lower()
     code = req.code or ""
     if not code.strip():
@@ -408,9 +431,9 @@ async def run_code(req: RunRequest):
 
 
 @app.post("/api/shell")
-async def shell(req: ShellRequest):
+async def shell(request: Request, req: ShellRequest):
     """Terminal: run a command in the workdir."""
-    _check_access(req.access_code)
+    _check_access(request, req.access_code)
     if not (req.command or "").strip():
         raise HTTPException(status_code=400, detail="empty command")
     out = await T.shell_exec(req.command)
@@ -418,15 +441,15 @@ async def shell(req: ShellRequest):
 
 
 @app.get("/api/files")
-async def files(access_code: str = "", path: str = "."):
-    _check_access(access_code)
+async def files(request: Request, access_code: str = "", path: str = "."):
+    _check_access(request, access_code)
     return {"listing": await T.file_list(path)}
 
 
 @app.get("/api/preview")
-def preview(path: str = "", access_code: str = ""):
+def preview(request: Request, path: str = "", access_code: str = ""):
     """Serve a workdir HTML file for live in-chat preview."""
-    _check_access(access_code)
+    _check_access(request, access_code)
     try:
         p = T._safe_path(path)
     except ValueError:
@@ -437,11 +460,11 @@ def preview(path: str = "", access_code: str = ""):
 
 
 @app.get("/api/shot/{name}")
-def shot(name: str, access_code: str = ""):
+def shot(request: Request, name: str, access_code: str = ""):
     # Gated like every other endpoint: screenshots can contain anything the
     # agent did (browsers, files, chats), so they must not be publicly
     # fetchable. The UI appends ?access_code= to every shot <img> src.
-    _check_access(access_code)
+    _check_access(request, access_code)
     p = os.path.join(T.SHOTS_DIR, os.path.basename(name))
     if not os.path.isfile(p):
         raise HTTPException(status_code=404, detail="no such screenshot")

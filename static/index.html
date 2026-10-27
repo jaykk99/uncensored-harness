@@ -1260,6 +1260,18 @@ function renderThreads(list) {
         } catch (err) { toast("Delete failed.", true); }
       };
       el.appendChild(del);
+      const exp = document.createElement("button");
+      exp.className = "tbtn"; exp.textContent = "\u2b07"; exp.title = "Export thread (.md)";
+      exp.onclick = e => {
+        e.stopPropagation();
+        // Content-Disposition: attachment makes this a download, not
+        // a navigation, so the temp anchor never leaves the chat.
+        const a = document.createElement("a");
+        a.href = "/api/threads/" + encodeURIComponent(t.id) +
+          "/export?access_code=" + encodeURIComponent(AC);
+        document.body.appendChild(a); a.click(); a.remove();
+      };
+      el.appendChild(exp);
       box.appendChild(el);
     });
 }

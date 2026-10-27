@@ -255,3 +255,43 @@ def test_thread_search_route_is_not_a_thread_id(monkeypatch, tmp_path):
     c, _tid = _thread_client(monkeypatch, tmp_path)
     r = c.get(f"/api/threads/search?q=first&access_code={CODE}")
     assert r.status_code == 200
+
+
+def test_thread_export_markdown_download(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/{tid}/export?access_code={CODE}")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/markdown")
+    assert f'filename="thread-{tid}.md"' in r.headers["content-disposition"]
+    body = r.text
+    assert body.startswith("# reopen me\n")
+    assert body.index("first question") < body.index("first answer")
+    assert "## You" in body and "## Assistant" in body
+
+
+def test_thread_export_json_and_full_thread(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    # Past the UI's 60-message page: an export must still carry all of it.
+    for i in range(65):
+        memory.add_message(tid, "user", f"bulk-{i}")
+    r = c.get(f"/api/threads/{tid}/export?format=json&access_code={CODE}")
+    assert r.status_code == 200
+    assert f'filename="thread-{tid}.json"' in r.headers["content-disposition"]
+    body = r.json()
+    assert body["thread"]["id"] == tid
+    assert body["total"] == 67
+    assert body["messages"][0]["content"] == "first question"
+    assert body["messages"][-1]["content"] == "bulk-64"
+
+
+def test_thread_export_guards(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/{tid}/export")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/{tid}/export?access_code=wrong")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/nope-not-real/export?access_code={CODE}")
+    assert r.status_code == 404
+    r = c.get(f"/api/threads/{tid}/export?format=pdf&access_code={CODE}")
+    assert r.status_code == 400

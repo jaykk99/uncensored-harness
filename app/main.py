@@ -5,6 +5,7 @@ Endpoints:
   GET  /api/health        — liveness + model routing + self-test summary
   GET  /api/self-test     — refusal-probe verification (access_code)
   GET  /api/threads       — list threads (access_code)
+  GET  /api/threads/{id}/export — download a whole thread, md or json
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
@@ -16,12 +17,13 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
 import os
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from . import agent as agent_mod
@@ -182,6 +184,62 @@ def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
             "messages": memory.get_history(thread_id, limit=limit,
                                            offset=offset),
             "total": memory.count_messages(thread_id)}
+
+
+def _thread_markdown(thread: dict, messages: list[dict]) -> str:
+    """A thread as a readable Markdown transcript, oldest-first.
+
+    The title is flattened to one line: it comes from a user message
+    (or a rename), so it may contain a newline that would otherwise
+    break the heading. Message bodies go in verbatim — this is the
+    user's own transcript, and escaping it would corrupt code blocks.
+    """
+    title = (thread.get("title") or "untitled").replace("\n", " ")
+    lines = [f"# {title}", ""]
+    created = thread.get("created")
+    if created:
+        started = datetime.datetime.fromtimestamp(
+            created, datetime.timezone.utc).isoformat()
+        lines.append(f"Thread {thread['id']}, started {started}.")
+        lines.append("")
+    labels = {"user": "You", "assistant": "Assistant"}
+    for m in messages:
+        lines.append(f"## {labels.get(m['role'], m['role'].capitalize())}")
+        lines.append("")
+        lines.append(m["content"])
+        lines.append("")
+    return "\n".join(lines)
+
+
+@app.get("/api/threads/{thread_id}/export")
+def thread_export(thread_id: str, format: str = "md",
+                  access_code: str = ""):
+    """Download a whole thread: Markdown transcript (default) or JSON.
+
+    Reopening a thread in the UI pages 60 messages at a time, so a long
+    chat could never leave the harness in one piece. An export always
+    carries the full thread, for saving or pasting elsewhere. Auth is
+    checked before the lookup so a wrong code cannot probe whether a
+    thread id exists.
+    """
+    _check_access(access_code)
+    thread = memory.get_thread(thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    fmt = (format or "md").lower()
+    if fmt not in ("md", "json"):
+        raise HTTPException(status_code=400, detail="format must be md or json")
+    messages = memory.get_all_messages(thread_id)
+    if fmt == "json":
+        body = json.dumps({"thread": thread, "messages": messages,
+                           "total": len(messages)}, indent=2)
+        return Response(content=body, media_type="application/json",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="thread-{thread_id}.json"'})
+    return Response(content=_thread_markdown(thread, messages),
+                    media_type="text/markdown",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="thread-{thread_id}.md"'})
 
 
 @app.delete("/api/threads/{thread_id}")

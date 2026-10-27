@@ -211,3 +211,21 @@ def test_search_limit_and_shape(memdb):
     limited = memdb.search_threads("commonword", limit=3)
     assert len(limited) == 3
     assert [h["id"] for h in limited] == [h["id"] for h in hits[:3]]
+
+
+def test_get_all_messages_returns_everything_in_order(memdb):
+    tid = memdb.create_thread("t")
+    for i in range(5):
+        memdb.add_message(tid, "user" if i % 2 == 0 else "assistant",
+                          f"msg-{i}")
+    assert [(m["role"], m["content"]) for m in memdb.get_all_messages(tid)] == [
+        ("user", "msg-0"), ("assistant", "msg-1"), ("user", "msg-2"),
+        ("assistant", "msg-3"), ("user", "msg-4")]
+    # No page cap, unlike get_history's 200: a long thread exports whole.
+    assert memdb.get_all_messages(tid) != memdb.get_history(tid, limit=2)
+
+
+def test_get_all_messages_empty_and_unknown(memdb):
+    tid = memdb.create_thread("t")
+    assert memdb.get_all_messages(tid) == []
+    assert memdb.get_all_messages("nope-not-real") == []

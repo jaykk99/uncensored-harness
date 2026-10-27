@@ -67,6 +67,24 @@ def get_history(tid: str, limit: int = 60, offset: int = 0) -> list[dict]:
     return [{"role": r, "content": co} for r, co in reversed(rows)]
 
 
+def get_all_messages(tid: str) -> list[dict]:
+    """Every message in a thread, oldest-first, with no page cap.
+
+    get_history() caps at 200 and pages newest-first, which is right
+    for the model feed and the UI pager but wrong for an export: a
+    saved transcript must carry the whole thread in reading order, so
+    this query has no LIMIT and sorts ascending. Same {role, content}
+    shape as get_history.
+    """
+    c = _conn()
+    rows = c.execute(
+        "SELECT role, content FROM messages WHERE thread_id=? "
+        "ORDER BY id ASC",
+        (tid,)).fetchall()
+    c.close()
+    return [{"role": r, "content": co} for r, co in rows]
+
+
 def count_messages(tid: str) -> int:
     """Total messages in a thread, for paging decisions in the UI."""
     c = _conn()

@@ -6,6 +6,7 @@ Endpoints:
   GET  /api/self-test     — refusal-probe verification (access_code)
   GET  /api/threads       — list threads (access_code)
   GET  /api/threads/{id}/export — download a whole thread, md or json
+  POST /api/threads/{id}/duplicate — fork a thread with all its messages
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
@@ -240,6 +241,25 @@ def thread_export(thread_id: str, format: str = "md",
                     media_type="text/markdown",
                     headers={"Content-Disposition":
                              f'attachment; filename="thread-{thread_id}.md"'})
+
+
+class ThreadAccessRequest(BaseModel):
+    access_code: str = ""
+
+
+@app.post("/api/threads/{thread_id}/duplicate")
+def thread_duplicate(thread_id: str, req: ThreadAccessRequest):
+    """Fork a thread: copy it and all its messages under a new id.
+
+    Auth is checked before the lookup so a wrong code cannot probe
+    whether a thread id exists, same as the other thread endpoints.
+    """
+    _check_access(req.access_code)
+    new_id = memory.duplicate_thread(thread_id)
+    if new_id is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    return {"duplicated": True, "thread": memory.get_thread(new_id),
+            "messages": memory.count_messages(new_id)}
 
 
 @app.delete("/api/threads/{thread_id}")

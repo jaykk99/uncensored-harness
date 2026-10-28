@@ -1260,6 +1260,22 @@ function renderThreads(list) {
         } catch (err) { toast("Delete failed.", true); }
       };
       el.appendChild(del);
+      const dup = document.createElement("button");
+      dup.className = "tbtn"; dup.textContent = "\u29c9"; dup.title = "Duplicate thread";
+      dup.onclick = async e => {
+        e.stopPropagation();
+        try {
+          const rr = await fetch("/api/threads/" + encodeURIComponent(t.id) +
+            "/duplicate", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ access_code: AC }) });
+          if (!rr.ok) throw new Error("duplicate failed");
+          const d = await rr.json();
+          loadThreads();
+          if (d.thread && d.thread.id) openThread(d.thread.id);
+        } catch (err) { toast("Duplicate failed.", true); }
+      };
+      el.appendChild(dup);
       const exp = document.createElement("button");
       exp.className = "tbtn"; exp.textContent = "\u2b07"; exp.title = "Export thread (.md)";
       exp.onclick = e => {

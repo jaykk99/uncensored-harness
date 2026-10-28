@@ -130,6 +130,27 @@ def rename_thread(tid: str, title: str) -> bool:
     return renamed
 
 
+def duplicate_thread(tid: str) -> str | None:
+    """Copy a thread and all its messages under a new id.
+
+    Branching a chat to try a different direction used to mean losing
+    the original or retyping the context: the sidebar had rename,
+    delete, and export, but no way to fork. The copy keeps the title
+    with a " (copy)" suffix (base truncated so the suffix survives the
+    60-char cap) and every message in order; the original is untouched.
+    Returns the new thread id, or None if the source does not exist.
+    """
+    src = get_thread(tid)
+    if src is None:
+        return None
+    suffix = " (copy)"
+    base = (src["title"] or "untitled")[:60 - len(suffix)]
+    new_id = create_thread(f"{base}{suffix}")
+    for m in get_all_messages(tid):
+        add_message(new_id, m["role"], m["content"])
+    return new_id
+
+
 def list_threads() -> list[dict]:
     c = _conn()
     rows = c.execute(

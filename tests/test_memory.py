@@ -225,6 +225,38 @@ def test_get_all_messages_returns_everything_in_order(memdb):
     assert memdb.get_all_messages(tid) != memdb.get_history(tid, limit=2)
 
 
+def test_duplicate_copies_messages_in_order_and_leaves_original(memdb):
+    tid = memdb.create_thread("branch me")
+    memdb.add_message(tid, "user", "first")
+    memdb.add_message(tid, "assistant", "second")
+    new_id = memdb.duplicate_thread(tid)
+    assert new_id is not None and new_id != tid
+    assert memdb.get_thread(new_id)["title"] == "branch me (copy)"
+    assert [(m["role"], m["content"]) for m in memdb.get_history(new_id)] == [
+        ("user", "first"), ("assistant", "second")]
+    # Original untouched, and the copy diverges independently.
+    assert memdb.get_history(tid)[0]["content"] == "first"
+    memdb.add_message(new_id, "user", "only in copy")
+    assert len(memdb.get_history(tid)) == 2
+    assert len(memdb.get_history(new_id)) == 3
+
+
+def test_duplicate_empty_thread_and_unknown(memdb):
+    tid = memdb.create_thread("empty")
+    new_id = memdb.duplicate_thread(tid)
+    assert memdb.get_thread(new_id)["title"] == "empty (copy)"
+    assert memdb.get_history(new_id) == []
+    assert memdb.duplicate_thread("nope-not-real") is None
+
+
+def test_duplicate_title_suffix_survives_cap(memdb):
+    tid = memdb.create_thread("x" * 60)
+    new_id = memdb.duplicate_thread(tid)
+    title = memdb.get_thread(new_id)["title"]
+    assert title == "x" * 53 + " (copy)"
+    assert len(title) == 60
+
+
 def test_get_all_messages_empty_and_unknown(memdb):
     tid = memdb.create_thread("t")
     assert memdb.get_all_messages(tid) == []

@@ -209,6 +209,34 @@ def test_thread_rename_updates_list(monkeypatch, tmp_path):
     assert "renamed thread" in titles
 
 
+def test_thread_duplicate_copies_and_opens_copy(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.post(f"/api/threads/{tid}/duplicate",
+               json={"access_code": "wrong"})
+    assert r.status_code == 401
+    r = c.post("/api/threads/nope-not-real/duplicate",
+               json={"access_code": CODE})
+    assert r.status_code == 404
+    r = c.post(f"/api/threads/{tid}/duplicate", json={"access_code": CODE})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["duplicated"] is True
+    assert body["messages"] == 2
+    new_id = body["thread"]["id"]
+    assert new_id != tid
+    assert body["thread"]["title"] == "reopen me (copy)"
+    # Copy carries the full history; original is untouched.
+    copy = c.get(f"/api/threads/{new_id}?access_code={CODE}").json()
+    assert [(m["role"], m["content"]) for m in copy["messages"]] == [
+        ("user", "first question"), ("assistant", "first answer")]
+    orig = c.get(f"/api/threads/{tid}?access_code={CODE}").json()
+    assert orig["total"] == 2
+    titles = [t["title"] for t in
+              c.get(f"/api/threads?access_code={CODE}").json()["threads"]]
+    assert "reopen me (copy)" in titles
+
+
 def test_probe_passes_known_provider_to_suite(monkeypatch):
     monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
     from app import probe as probe_mod

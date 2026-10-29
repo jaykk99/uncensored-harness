@@ -12,6 +12,10 @@ A personal agent computer: chat UI, terminal + filesystem (sandboxed to the work
 
 **Uncensored means** no refusals on legitimate work — coding, business ops, research, writing, analysis, authorized security work on your own assets. It is *not* a bypass: a small set of hard boundaries stays in place (stolen-card fraud, phishing kits, draining anyone's funds, unauthorized hacking targets, weapons of mass harm, sexual content involving minors, doxxing). Those are the only refusals, ever, each paired with the nearest legitimate alternative. See `app/guards.py`.
 
+## Refusal policy (template feature)
+
+Refusal policy is yours: edit `app/guard_policy.py` to set what your instance refuses; it ships empty. This app is a template — whoever deploys an instance writes their own refusal policy in that one file (or the `GUARD_*` env vars): your own block patterns for user messages, any extra phrases that mark a model reply as a refusal for the router's skip logic, and the behaviour switches for refusal-skipping and uncensored-first chain order. Zero preset entries ship in the lists. The hard floor is separate and always on: the boundary pre-check in `app/guards.py` and the access-code gate. Those are not in the config and cannot be configured away.
+
 ## Model routing
 
 Every turn goes through this chain (see `app/models.py`, `app/providers.py`):

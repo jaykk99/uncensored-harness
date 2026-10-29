@@ -150,7 +150,16 @@ def looks_like_refusal(text: str) -> bool:
     t = _norm(text or "")
     if not t.strip():
         return True  # empty non-answer
-    patterns = REFUSAL_PATTERNS
+    # Per-deployment soft policy (app/guard_policy.py): the owner can turn
+    # refusal-skipping OFF (first answer returned as-is) and can add their
+    # own refusal phrases to the built-in detection list. Defaults preserve
+    # current behaviour: skip ON, zero extra phrases shipped.
+    from . import guard_policy
+    if not guard_policy.SKIP_REFUSALS:
+        return False
+    patterns = REFUSAL_PATTERNS + [
+        _norm(p) for p in guard_policy.effective_refusal_phrases()
+    ]
     if "sorry to hear" in t:
         # Empathy, not a refusal ("I'm sorry to hear your server went
         # down. Here is the fix...") — ignore the sorry patterns only;

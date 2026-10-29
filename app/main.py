@@ -33,6 +33,7 @@ from . import integrations, memory, models
 from . import providers as providers_mod
 from . import tools as T
 from .guards import check_hard_boundary
+from .guard_policy import check_owner_boundary
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -335,7 +336,10 @@ async def chat(req: ChatRequest):
     if not message:
         raise HTTPException(status_code=400, detail="empty message")
 
-    hit = check_hard_boundary(message)
+    # Per-deployment refusal policy (app/guard_policy.py): this instance's
+    # own owner-written patterns. Ships empty — nothing extra refused until
+    # the owner adds an entry. The hard floor above always applies first.
+    hit = check_hard_boundary(message) or check_owner_boundary(message)
     if hit:
         thread_id = req.thread_id or memory.create_thread(message[:40])
         memory.add_message(thread_id, "user", message)

@@ -459,8 +459,9 @@ def omni_chain(preferred_id: str = "",
 
     stats (router_stats.snapshot() rows) enables health-aware ordering:
     within a tier, legs with poor recent stats (>=3 attempts, <50%
-    success) or stale data are tried last. Tier order itself never
-    changes — the uncensored-first promise holds regardless of stats.
+    success) or stale data are tried last. Health stats never change the
+    tier order — only the owner's own preference can (GUARD_UNCENSORED_FIRST
+    in app/guard_policy.py; default ON = uncensored-first).
     Set ROUTER_HEALTH_ORDER=0 to force static order.
     """
     tiers: list[tuple[int, ProviderDef, str]] = []
@@ -481,14 +482,19 @@ def omni_chain(preferred_id: str = "",
                 push(0, p, model)
     # 1) Uncensored keyed models first (Dolphin/Hermes carry the load when
     #    keys exist; they answer in seconds, not Horde-queue minutes).
+    #    Per-deployment preference (app/guard_policy.py): with
+    #    UNCENSORED_FIRST off, the keyless backstop tier leads instead.
+    #    Default ON preserves the uncensored-first promise.
+    from . import guard_policy
+    uncensored_tier, backstop_tier = (1, 2) if guard_policy.UNCENSORED_FIRST else (2, 1)
     for p in KEYED_PROVIDERS:
         if p.uncensored and key_is_set(p):
             for m in p.models:
-                push(1, p, m)
+                push(uncensored_tier, p, m)
     # 2) Keyless reliability backstop.
     for p in KEYLESS_PROVIDERS:
         for m in p.models:
-            push(2, p, m)
+            push(backstop_tier, p, m)
     # 3) Remaining keyed providers with keys set.
     for p in KEYED_PROVIDERS:
         if not p.uncensored and key_is_set(p):
@@ -502,4 +508,10 @@ def omni_chain(preferred_id: str = "",
         # preserved, so good legs never shuffle around.
         tiers.sort(key=lambda t: (
             t[0], _health_penalty(t[1].name, t[2], by_leg)))
+    else:
+        # Stable tier sort: with the default tier assignment this is the
+        # exact push order (no behaviour change); it is what makes the
+        # owner's GUARD_UNCENSORED_FIRST preference take effect when the
+        # tiers are swapped in app/guard_policy.py.
+        tiers.sort(key=lambda t: t[0])
     return [(p, m) for _, p, m in tiers]

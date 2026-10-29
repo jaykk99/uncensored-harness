@@ -14,7 +14,14 @@ def _conn():
     os.makedirs(os.path.dirname(os.path.abspath(DB)), exist_ok=True)
     c = sqlite3.connect(DB)
     c.execute("""CREATE TABLE IF NOT EXISTS threads
-                 (id TEXT PRIMARY KEY, title TEXT, created REAL)""")
+                 (id TEXT PRIMARY KEY, title TEXT, created REAL,
+                  pinned INTEGER NOT NULL DEFAULT 0)""")
+    # Older DBs were created before the pinned column existed: add it
+    # in place so a pinned thread survives a deploy, instead of wiping
+    # the thread table or crashing every query that selects pinned.
+    cols = {r[1] for r in c.execute("PRAGMA table_info(threads)")}
+    if "pinned" not in cols:
+        c.execute("ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
     c.execute("""CREATE TABLE IF NOT EXISTS messages
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT,
                   role TEXT, content TEXT, created REAL)""")
@@ -24,7 +31,10 @@ def _conn():
 def create_thread(title: str) -> str:
     tid = uuid.uuid4().hex[:12]
     c = _conn()
-    c.execute("INSERT INTO threads VALUES (?,?,?)", (tid, title[:60], time.time()))
+    # Named columns: the table gained `pinned` (default 0) and a bare
+    # VALUES list would break on the 4-column table.
+    c.execute("INSERT INTO threads (id, title, created) VALUES (?,?,?)",
+              (tid, title[:60], time.time()))
     c.commit()
     c.close()
     return tid
@@ -97,11 +107,12 @@ def count_messages(tid: str) -> int:
 def get_thread(tid: str) -> dict | None:
     c = _conn()
     row = c.execute(
-        "SELECT id, title, created FROM threads WHERE id=?", (tid,)).fetchone()
+        "SELECT id, title, created, pinned FROM threads WHERE id=?", (tid,)).fetchone()
     c.close()
     if not row:
         return None
-    return {"id": row[0], "title": row[1], "created": row[2]}
+    return {"id": row[0], "title": row[1], "created": row[2],
+            "pinned": bool(row[3])}
 
 
 def delete_thread(tid: str) -> bool:
@@ -138,6 +149,8 @@ def duplicate_thread(tid: str) -> str | None:
     delete, and export, but no way to fork. The copy keeps the title
     with a " (copy)" suffix (base truncated so the suffix survives the
     60-char cap) and every message in order; the original is untouched.
+    The copy starts unpinned even if the source was pinned, so pinning
+    stays an explicit choice per thread.
     Returns the new thread id, or None if the source does not exist.
     """
     src = get_thread(tid)
@@ -151,12 +164,28 @@ def duplicate_thread(tid: str) -> str | None:
     return new_id
 
 
+def set_thread_pinned(tid: str, pinned: bool) -> bool:
+    """Pin or unpin a thread. Returns False if the thread does not exist."""
+    c = _conn()
+    cur = c.execute("UPDATE threads SET pinned=? WHERE id=?",
+                    (1 if pinned else 0, tid))
+    changed = cur.rowcount > 0
+    c.commit()
+    c.close()
+    return changed
+
+
 def list_threads() -> list[dict]:
+    """Newest first, except pinned threads always sort above unpinned
+    ones: the sidebar only shows the newest 50, so without pinning an
+    important older chat slides out of reach entirely."""
     c = _conn()
     rows = c.execute(
-        "SELECT id, title, created FROM threads ORDER BY created DESC LIMIT 50").fetchall()
+        "SELECT id, title, created, pinned FROM threads "
+        "ORDER BY pinned DESC, created DESC LIMIT 50").fetchall()
     c.close()
-    return [{"id": r[0], "title": r[1], "created": r[2]} for r in rows]
+    return [{"id": r[0], "title": r[1], "created": r[2],
+             "pinned": bool(r[3])} for r in rows]
 
 
 def search_threads(query: str, limit: int = 20) -> list[dict]:

@@ -237,6 +237,31 @@ def test_thread_duplicate_copies_and_opens_copy(monkeypatch, tmp_path):
     assert "reopen me (copy)" in titles
 
 
+def test_thread_pin_toggles_sets_and_sorts_first(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    newer = memory.create_thread("newer chat")
+    # Auth first, then 404 — same gate order as the other thread endpoints.
+    r = c.post(f"/api/threads/{tid}/pin", json={"access_code": "wrong"})
+    assert r.status_code == 401
+    r = c.post("/api/threads/nope-not-real/pin", json={"access_code": CODE})
+    assert r.status_code == 404
+    # Toggle (no pinned value): off -> on, and the pinned thread jumps
+    # above the newer unpinned one in the sidebar list.
+    r = c.post(f"/api/threads/{tid}/pin", json={"access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["pinned"] is True
+    assert r.json()["thread"]["pinned"] is True
+    listed = c.get(f"/api/threads?access_code={CODE}").json()["threads"]
+    assert [t["id"] for t in listed] == [tid, newer]
+    # Explicit set back to unpinned restores newest-first order.
+    r = c.post(f"/api/threads/{tid}/pin",
+               json={"pinned": False, "access_code": CODE})
+    assert r.json()["pinned"] is False
+    listed = c.get(f"/api/threads?access_code={CODE}").json()["threads"]
+    assert [t["id"] for t in listed] == [newer, tid]
+
+
 def test_probe_passes_known_provider_to_suite(monkeypatch):
     monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
     from app import probe as probe_mod

@@ -7,6 +7,7 @@ Endpoints:
   GET  /api/threads       — list threads (access_code)
   GET  /api/threads/{id}/export — download a whole thread, md or json
   POST /api/threads/{id}/duplicate — fork a thread with all its messages
+  POST /api/threads/{id}/pin — pin/unpin a thread (pinned sort first)
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
@@ -247,6 +248,11 @@ class ThreadAccessRequest(BaseModel):
     access_code: str = ""
 
 
+class ThreadPinRequest(BaseModel):
+    pinned: bool | None = None  # None = toggle the current state
+    access_code: str = ""
+
+
 @app.post("/api/threads/{thread_id}/duplicate")
 def thread_duplicate(thread_id: str, req: ThreadAccessRequest):
     """Fork a thread: copy it and all its messages under a new id.
@@ -260,6 +266,24 @@ def thread_duplicate(thread_id: str, req: ThreadAccessRequest):
         raise HTTPException(status_code=404, detail="no such thread")
     return {"duplicated": True, "thread": memory.get_thread(new_id),
             "messages": memory.count_messages(new_id)}
+
+
+@app.post("/api/threads/{thread_id}/pin")
+def thread_pin(thread_id: str, req: ThreadPinRequest):
+    """Pin a thread to the top of the sidebar, or unpin it.
+
+    With no `pinned` value the call toggles, which is what the sidebar
+    star button needs; an explicit value sets the state outright.
+    Auth is checked before the lookup so a wrong code cannot probe
+    whether a thread id exists, same as the other thread endpoints.
+    """
+    _check_access(req.access_code)
+    thread = memory.get_thread(thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    pinned = (not thread["pinned"]) if req.pinned is None else req.pinned
+    memory.set_thread_pinned(thread_id, pinned)
+    return {"pinned": pinned, "thread": memory.get_thread(thread_id)}
 
 
 @app.delete("/api/threads/{thread_id}")

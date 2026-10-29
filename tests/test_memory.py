@@ -69,9 +69,50 @@ def test_list_threads_newest_first_and_capped(memdb):
 def test_list_threads_shape(memdb):
     tid = memdb.create_thread("shape")
     (row,) = [t for t in memdb.list_threads() if t["id"] == tid]
-    assert set(row) == {"id", "title", "created"}
+    assert set(row) == {"id", "title", "created", "pinned"}
     assert row["title"] == "shape"
+    assert row["pinned"] is False
     assert isinstance(row["created"], float)
+
+
+def test_pin_sorts_above_newer_unpinned(memdb):
+    old = memdb.create_thread("old but important")
+    new = memdb.create_thread("newer")
+    assert [t["id"] for t in memdb.list_threads()] == [new, old]
+    assert memdb.set_thread_pinned(old, True) is True
+    assert memdb.get_thread(old)["pinned"] is True
+    assert [t["id"] for t in memdb.list_threads()] == [old, new]
+    assert memdb.set_thread_pinned(old, False) is True
+    assert [t["id"] for t in memdb.list_threads()] == [new, old]
+
+
+def test_pin_unknown_thread_is_false(memdb):
+    assert memdb.set_thread_pinned("nope-not-real", True) is False
+
+
+def test_duplicate_of_pinned_thread_starts_unpinned(memdb):
+    tid = memdb.create_thread("pinned source")
+    memdb.set_thread_pinned(tid, True)
+    new_id = memdb.duplicate_thread(tid)
+    assert memdb.get_thread(new_id)["pinned"] is False
+    assert memdb.get_thread(tid)["pinned"] is True
+
+
+def test_old_db_without_pinned_column_migrates(memdb, tmp_path, monkeypatch):
+    # DBs created before pinning have no pinned column at all.
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, created REAL)")
+    c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+              " thread_id TEXT, role TEXT, content TEXT, created REAL)")
+    c.execute("INSERT INTO threads VALUES (?,?,?)", ("oldthreadid1", "legacy", 1.0))
+    c.commit()
+    c.close()
+    monkeypatch.setattr(memdb, "DB", path)
+    assert memdb.get_thread("oldthreadid1")["pinned"] is False
+    assert memdb.set_thread_pinned("oldthreadid1", True) is True
+    assert memdb.list_threads()[0]["pinned"] is True
 
 
 def test_unicode_and_newlines_roundtrip(memdb):

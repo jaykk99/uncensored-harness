@@ -4,10 +4,11 @@ Endpoints:
   GET  /                  — chat UI
   GET  /api/health        — liveness + model routing + self-test summary
   GET  /api/self-test     — refusal-probe verification (access_code)
-  GET  /api/threads       — list threads (access_code)
+  GET  /api/threads       — list threads (access_code, archived=true for the archive view)
   GET  /api/threads/{id}/export — download a whole thread, md or json
   POST /api/threads/{id}/duplicate — fork a thread with all its messages
   POST /api/threads/{id}/pin — pin/unpin a thread (pinned sort first)
+  POST /api/threads/{id}/archive — archive/unarchive a thread (hidden from the sidebar list)
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
@@ -147,8 +148,10 @@ def router_stats_reset(req: RouterResetRequest):
 
 
 @app.get("/api/threads")
-def threads(access_code: str = ""):
+def threads(access_code: str = "", archived: bool = False):
     _check_access(access_code)
+    if archived:
+        return {"threads": memory.list_archived_threads()}
     return {"threads": memory.list_threads()}
 
 
@@ -254,6 +257,11 @@ class ThreadPinRequest(BaseModel):
     access_code: str = ""
 
 
+class ThreadArchiveRequest(BaseModel):
+    archived: bool | None = None  # None = toggle the current state
+    access_code: str = ""
+
+
 @app.post("/api/threads/{thread_id}/duplicate")
 def thread_duplicate(thread_id: str, req: ThreadAccessRequest):
     """Fork a thread: copy it and all its messages under a new id.
@@ -285,6 +293,26 @@ def thread_pin(thread_id: str, req: ThreadPinRequest):
     pinned = (not thread["pinned"]) if req.pinned is None else req.pinned
     memory.set_thread_pinned(thread_id, pinned)
     return {"pinned": pinned, "thread": memory.get_thread(thread_id)}
+
+
+@app.post("/api/threads/{thread_id}/archive")
+def thread_archive(thread_id: str, req: ThreadArchiveRequest):
+    """Archive a thread out of the sidebar list, or unarchive it back.
+
+    With no `archived` value the call toggles, which is what the
+    sidebar archive button needs; an explicit value sets the state
+    outright. Auth is checked before the lookup so a wrong code cannot
+    probe whether a thread id exists, same as the other thread endpoints.
+    Archiving never deletes anything: the thread stays reopenable,
+    searchable, and exportable, and unarchiving restores it to the list.
+    """
+    _check_access(req.access_code)
+    thread = memory.get_thread(thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    archived = (not thread["archived"]) if req.archived is None else req.archived
+    memory.set_thread_archived(thread_id, archived)
+    return {"archived": archived, "thread": memory.get_thread(thread_id)}
 
 
 @app.delete("/api/threads/{thread_id}")

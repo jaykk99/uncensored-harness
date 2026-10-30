@@ -111,6 +111,8 @@
     border: 0; border-radius: 10px; cursor: pointer; font-size: 14px; font-weight: 600; }
   #newchat:hover { background: var(--accent2); }
   #threadsearch { margin: 0 12px 8px; padding: 8px 10px; background: var(--panel2);
+  #archivedtoggle { margin: 0 12px 8px; padding: 6px 10px; background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--dim); cursor: pointer; font-size: 12px; text-align: left; }
+  #archivedtoggle:hover { color: var(--text); }
     color: var(--text); border: 1px solid var(--border); border-radius: 9px; font-size: 13px; }
   .thread .tsnip { font-size: 12px; color: var(--dim); overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
@@ -435,6 +437,7 @@
     <h2>Chats</h2>
     <button id="newchat">+ New chat</button>
     <input id="threadsearch" type="text" placeholder="Search chats..." autocomplete="off">
+    <button id="archivedtoggle">Show archived</button>
     <div id="threads"></div>
     <div id="sidefoot">
       <div id="routeinfo">last route: <b>not run yet</b></div>
@@ -1207,11 +1210,22 @@ async function openThread(id) {
 async function loadThreads() {
   if (!AC) return;
   try {
-    const r = await fetch("/api/threads?access_code=" + encodeURIComponent(AC));
+    const q = showingArchived ? "&archived=true" : "";
+    const r = await fetch("/api/threads?access_code=" + encodeURIComponent(AC) + q);
     const d = await r.json();
     renderThreads(d.threads || []);
   } catch (e) { /* offline */ }
 }
+/* Archive view: finished chats leave the sidebar list without being
+   deleted. Toggling back shows the normal list; search still finds
+   archived threads either way, so nothing is ever stranded. */
+let showingArchived = false;
+$("archivedtoggle").onclick = () => {
+  showingArchived = !showingArchived;
+  $("archivedtoggle").textContent = showingArchived ? "Show chats" : "Show archived";
+  $("threadsearch").value = "";
+  loadThreads();
+};
 function renderThreads(list) {
     const box = $("threads");
     box.innerHTML = "";
@@ -1249,6 +1263,23 @@ function renderThreads(list) {
         } catch (err) { toast("Pin failed.", true); }
       };
       el.appendChild(pin);
+      const arc = document.createElement("button");
+      arc.className = "tbtn" + (t.archived ? " on" : "");
+      arc.textContent = "\u{1F5C4}";
+      arc.title = t.archived ? "Unarchive thread" : "Archive thread";
+      arc.onclick = async e => {
+        e.stopPropagation();
+        try {
+          const rr = await fetch("/api/threads/" + encodeURIComponent(t.id) +
+            "/archive", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ access_code: AC }) });
+          if (!rr.ok) throw new Error("archive failed");
+          if (threadId === t.id && !t.archived) { threadId = ""; newChat(); }
+          loadThreads();
+        } catch (err) { toast("Archive failed.", true); }
+      };
+      el.appendChild(arc);
       const ren = document.createElement("button");
       ren.className = "tbtn"; ren.textContent = "\u270e"; ren.title = "Rename thread";
       ren.onclick = async e => {

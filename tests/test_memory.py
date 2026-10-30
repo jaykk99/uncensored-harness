@@ -69,9 +69,10 @@ def test_list_threads_newest_first_and_capped(memdb):
 def test_list_threads_shape(memdb):
     tid = memdb.create_thread("shape")
     (row,) = [t for t in memdb.list_threads() if t["id"] == tid]
-    assert set(row) == {"id", "title", "created", "pinned"}
+    assert set(row) == {"id", "title", "created", "pinned", "archived"}
     assert row["title"] == "shape"
     assert row["pinned"] is False
+    assert row["archived"] is False
     assert isinstance(row["created"], float)
 
 
@@ -88,6 +89,62 @@ def test_pin_sorts_above_newer_unpinned(memdb):
 
 def test_pin_unknown_thread_is_false(memdb):
     assert memdb.set_thread_pinned("nope-not-real", True) is False
+
+
+def test_archive_hides_from_list_and_archive_view_lists_it(memdb):
+    old = memdb.create_thread("finished chat")
+    new = memdb.create_thread("active chat")
+    assert memdb.set_thread_archived(old, True) is True
+    assert memdb.get_thread(old)["archived"] is True
+    # Sidebar list drops it; the archive view is the only place it shows.
+    assert [t["id"] for t in memdb.list_threads()] == [new]
+    assert [t["id"] for t in memdb.list_archived_threads()] == [old]
+    # Unarchiving brings it straight back to the sidebar list.
+    assert memdb.set_thread_archived(old, False) is True
+    assert [t["id"] for t in memdb.list_threads()] == [new, old]
+    assert memdb.list_archived_threads() == []
+
+
+def test_archive_unknown_thread_is_false(memdb):
+    assert memdb.set_thread_archived("nope-not-real", True) is False
+
+
+def test_duplicate_of_archived_thread_starts_unarchived(memdb):
+    tid = memdb.create_thread("archived source")
+    memdb.set_thread_archived(tid, True)
+    new_id = memdb.duplicate_thread(tid)
+    assert memdb.get_thread(new_id)["archived"] is False
+    assert memdb.get_thread(tid)["archived"] is True
+    assert new_id in [t["id"] for t in memdb.list_threads()]
+
+
+def test_search_still_finds_archived_thread(memdb):
+    # Archiving must never strand a thread: search is the recovery path
+    # for a chat the user archived and then forgot the title of.
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "the quota script broke again")
+    memdb.set_thread_archived(tid, True)
+    hits = memdb.search_threads("quota")
+    assert [h["id"] for h in hits] == [tid]
+    assert hits[0]["archived"] is True
+
+
+def test_old_db_without_archived_column_migrates(memdb, tmp_path, monkeypatch):
+    # DBs created before archiving have neither new column at all.
+    import sqlite3
+    path = str(tmp_path / "old2.db")
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, created REAL)")
+    c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+              " thread_id TEXT, role TEXT, content TEXT, created REAL)")
+    c.execute("INSERT INTO threads VALUES (?,?,?)", ("oldthreadid2", "legacy", 1.0))
+    c.commit()
+    c.close()
+    monkeypatch.setattr(memdb, "DB", path)
+    assert memdb.get_thread("oldthreadid2")["archived"] is False
+    assert memdb.set_thread_archived("oldthreadid2", True) is True
+    assert memdb.list_threads() == []
+    assert [t["id"] for t in memdb.list_archived_threads()] == ["oldthreadid2"]
 
 
 def test_duplicate_of_pinned_thread_starts_unpinned(memdb):
@@ -248,7 +305,7 @@ def test_search_limit_and_shape(memdb):
         ids.append(tid)
     hits = memdb.search_threads("commonword")
     assert len(hits) == 20  # default limit
-    assert set(hits[0]) == {"id", "title", "created", "snippet"}
+    assert set(hits[0]) == {"id", "title", "created", "archived", "snippet"}
     limited = memdb.search_threads("commonword", limit=3)
     assert len(limited) == 3
     assert [h["id"] for h in limited] == [h["id"] for h in hits[:3]]

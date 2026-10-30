@@ -262,6 +262,36 @@ def test_thread_pin_toggles_sets_and_sorts_first(monkeypatch, tmp_path):
     assert [t["id"] for t in listed] == [newer, tid]
 
 
+def test_thread_archive_toggles_sets_and_hides_from_list(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    other = memory.create_thread("still active")
+    # Auth first, then 404 — same gate order as the other thread endpoints.
+    r = c.post(f"/api/threads/{tid}/archive", json={"access_code": "wrong"})
+    assert r.status_code == 401
+    r = c.post("/api/threads/nope-not-real/archive", json={"access_code": CODE})
+    assert r.status_code == 404
+    # Toggle (no archived value): off -> on, and the thread leaves the
+    # sidebar list but shows in the archive view.
+    r = c.post(f"/api/threads/{tid}/archive", json={"access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["archived"] is True
+    assert r.json()["thread"]["archived"] is True
+    listed = c.get(f"/api/threads?access_code={CODE}").json()["threads"]
+    assert [t["id"] for t in listed] == [other]
+    archived = c.get(f"/api/threads?archived=true&access_code={CODE}").json()["threads"]
+    assert [t["id"] for t in archived] == [tid]
+    # Archiving never deletes: detail and export still serve it.
+    assert c.get(f"/api/threads/{tid}?access_code={CODE}").status_code == 200
+    assert c.get(f"/api/threads/{tid}/export?access_code={CODE}").status_code == 200
+    # Explicit set back to unarchived restores it to the sidebar list.
+    r = c.post(f"/api/threads/{tid}/archive",
+               json={"archived": False, "access_code": CODE})
+    assert r.json()["archived"] is False
+    listed = c.get(f"/api/threads?access_code={CODE}").json()["threads"]
+    assert [t["id"] for t in listed] == [other, tid]
+
+
 def test_probe_passes_known_provider_to_suite(monkeypatch):
     monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
     from app import probe as probe_mod

@@ -333,6 +333,18 @@ def test_thread_search_finds_by_content_and_title(monkeypatch, tmp_path):
     assert r.json()["threads"] == []
 
 
+def test_thread_search_hit_carries_pinned_flag(monkeypatch, tmp_path):
+    # Search hits render through the same sidebar list as /api/threads,
+    # so a pinned hit must carry the flag or its star renders unpinned.
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.post(f"/api/threads/{tid}/pin", json={"access_code": CODE})
+    assert r.json()["pinned"] is True
+    r = c.get(f"/api/threads/search?q=first+question&access_code={CODE}")
+    hits = r.json()["threads"]
+    assert [h["id"] for h in hits] == [tid]
+    assert hits[0]["pinned"] is True
+
+
 def test_thread_search_route_is_not_a_thread_id(monkeypatch, tmp_path):
     # "search" must hit the search endpoint, not thread_detail's 404.
     c, _tid = _thread_client(monkeypatch, tmp_path)

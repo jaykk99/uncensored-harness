@@ -305,10 +305,40 @@ def test_search_limit_and_shape(memdb):
         ids.append(tid)
     hits = memdb.search_threads("commonword")
     assert len(hits) == 20  # default limit
-    assert set(hits[0]) == {"id", "title", "created", "archived", "snippet"}
+    assert set(hits[0]) == {"id", "title", "created", "archived", "pinned",
+                            "snippet"}
     limited = memdb.search_threads("commonword", limit=3)
     assert len(limited) == 3
     assert [h["id"] for h in limited] == [h["id"] for h in hits[:3]]
+
+
+def test_search_sorts_pinned_above_newer_unpinned(memdb):
+    # The sidebar lists pinned threads first, but search used to sort
+    # purely by newest matching message: a pinned older chat sank below
+    # a newer unpinned one, and its hit carried no pinned flag at all,
+    # so the sidebar star rendered unpinned for a pinned thread.
+    old = memdb.create_thread("old pinned")
+    memdb.add_message(old, "user", "commonword old")
+    time.sleep(0.01)
+    new = memdb.create_thread("new unpinned")
+    memdb.add_message(new, "user", "commonword new")
+    assert memdb.set_thread_pinned(old, True) is True
+    hits = memdb.search_threads("commonword")
+    assert [h["id"] for h in hits] == [old, new]
+    assert hits[0]["pinned"] is True
+    assert hits[1]["pinned"] is False
+
+
+def test_search_finds_message_less_thread_by_title(memdb):
+    # Search joined threads to messages, so a thread with no messages
+    # yet was invisible even when its title matched exactly.
+    tid = memdb.create_thread("railway deploy notes")
+    other = memdb.create_thread("other")
+    memdb.add_message(other, "user", "unrelated")
+    hits = memdb.search_threads("railway")
+    assert [h["id"] for h in hits] == [tid]
+    assert "railway" in hits[0]["snippet"].lower()
+    assert hits[0]["pinned"] is False
 
 
 def test_get_all_messages_returns_everything_in_order(memdb):

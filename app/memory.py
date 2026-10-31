@@ -235,6 +235,11 @@ def search_threads(query: str, limit: int = 20) -> list[dict]:
     matching message, so the user can tell *why* it matched before
     opening it. LIKE wildcards in the query are escaped: a literal "%"
     in the search text must not match everything.
+    Results sort the way the sidebar lists them: pinned threads first,
+    then most recent match. A hit carries `pinned` so the sidebar star
+    renders correctly for search results too, not just for the list.
+    The messages join is a LEFT JOIN: a thread with no messages yet
+    must still be findable by its title, with the title as its snippet.
     """
     q = (query or "").strip()
     if not q:
@@ -244,25 +249,30 @@ def search_threads(query: str, limit: int = 20) -> list[dict]:
     limit = max(1, min(limit, 50))
     c = _conn()
     rows = c.execute(
-        """SELECT t.id, t.title, t.created, t.archived, m.content
-             FROM threads t JOIN messages m ON m.thread_id = t.id
+        """SELECT t.id, t.title, t.created, t.archived, t.pinned, m.content
+             FROM threads t LEFT JOIN messages m ON m.thread_id = t.id
             WHERE t.title LIKE ? ESCAPE '\\' OR m.content LIKE ? ESCAPE '\\'
-            ORDER BY m.created DESC""",
+            ORDER BY t.pinned DESC,
+                     COALESCE(m.created, t.created) DESC""",
         (pat, pat)).fetchall()
     c.close()
     seen: dict[str, dict] = {}
-    for tid, title, created, archived, content in rows:
+    for tid, title, created, archived, pinned, content in rows:
         if tid in seen:
             continue
-        idx = content.lower().find(q.lower())
-        if idx < 0:
+        if not content:
             snippet = (title or "")[:120]
         else:
-            start = max(0, idx - 40)
-            snippet = content[start:idx + len(q) + 80].replace("\n", " ")
-            snippet = ("..." if start > 0 else "") + snippet
+            idx = content.lower().find(q.lower())
+            if idx < 0:
+                snippet = (title or "")[:120]
+            else:
+                start = max(0, idx - 40)
+                snippet = content[start:idx + len(q) + 80].replace("\n", " ")
+                snippet = ("..." if start > 0 else "") + snippet
         seen[tid] = {"id": tid, "title": title, "created": created,
-                     "archived": bool(archived), "snippet": snippet}
+                     "archived": bool(archived), "pinned": bool(pinned),
+                     "snippet": snippet}
         if len(seen) >= limit:
             break
     return list(seen.values())

@@ -385,6 +385,26 @@ def test_duplicate_title_suffix_survives_cap(memdb):
     assert len(title) == 60
 
 
+def test_import_thread_restores_messages_in_order_under_new_id(memdb):
+    msgs = [{"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi back"}]
+    new_id = memdb.import_thread("restored chat", msgs)
+    assert isinstance(new_id, str) and len(new_id) == 12
+    thread = memdb.get_thread(new_id)
+    assert thread["title"] == "restored chat"
+    assert thread["pinned"] is False and thread["archived"] is False
+    assert [(m["role"], m["content"]) for m in memdb.get_history(new_id)] == [
+        ("user", "hello"), ("assistant", "hi back")]
+
+
+def test_import_thread_empty_title_and_long_title(memdb):
+    new_id = memdb.import_thread("", [])
+    assert memdb.get_thread(new_id)["title"] == "untitled"
+    assert memdb.get_history(new_id) == []
+    long_id = memdb.import_thread("y" * 100, [])
+    assert memdb.get_thread(long_id)["title"] == "y" * 60
+
+
 def test_get_all_messages_empty_and_unknown(memdb):
     tid = memdb.create_thread("t")
     assert memdb.get_all_messages(tid) == []

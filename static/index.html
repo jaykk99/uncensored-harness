@@ -113,6 +113,8 @@
   #threadsearch { margin: 0 12px 8px; padding: 8px 10px; background: var(--panel2);
   #archivedtoggle { margin: 0 12px 8px; padding: 6px 10px; background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--dim); cursor: pointer; font-size: 12px; text-align: left; }
   #archivedtoggle:hover { color: var(--text); }
+  #importbtn { margin: 0 12px 8px; padding: 6px 10px; background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--dim); cursor: pointer; font-size: 12px; text-align: left; }
+  #importbtn:hover { color: var(--text); }
     color: var(--text); border: 1px solid var(--border); border-radius: 9px; font-size: 13px; }
   .thread .tsnip { font-size: 12px; color: var(--dim); overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
@@ -438,6 +440,8 @@
     <button id="newchat">+ New chat</button>
     <input id="threadsearch" type="text" placeholder="Search chats..." autocomplete="off">
     <button id="archivedtoggle">Show archived</button>
+    <button id="importbtn">Import chat (.json)</button>
+    <input id="importfile" type="file" accept=".json,application/json" hidden>
     <div id="threads"></div>
     <div id="sidefoot">
       <div id="routeinfo">last route: <b>not run yet</b></div>
@@ -1225,6 +1229,27 @@ $("archivedtoggle").onclick = () => {
   $("archivedtoggle").textContent = showingArchived ? "Show chats" : "Show archived";
   $("threadsearch").value = "";
   loadThreads();
+};
+/* Import: the round-trip for export. An exported .json restores as a
+   new thread (fresh id, unpinned, unarchived) and opens immediately,
+   so a deleted thread or a move to a fresh deploy is recoverable. */
+$("importbtn").onclick = () => $("importfile").click();
+$("importfile").onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    const payload = JSON.parse(await file.text());
+    const rr = await fetch("/api/threads/import", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread: payload.thread || {},
+        messages: payload.messages || [], access_code: AC }) });
+    if (!rr.ok) throw new Error((await rr.json()).detail || "import failed");
+    const d = await rr.json();
+    loadThreads();
+    if (d.thread && d.thread.id) openThread(d.thread.id);
+    toast("Chat imported.");
+  } catch (err) { toast("Import failed: " + err.message, true); }
 };
 function renderThreads(list) {
     const box = $("threads");

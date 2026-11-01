@@ -5,6 +5,7 @@ Endpoints:
   GET  /api/health        — liveness + model routing + self-test summary
   GET  /api/self-test     — refusal-probe verification (access_code)
   GET  /api/threads       — list threads (access_code, archived=true for the archive view)
+  POST /api/threads/import — restore a thread from an exported JSON file
   GET  /api/threads/{id}/export — download a whole thread, md or json
   POST /api/threads/{id}/duplicate — fork a thread with all its messages
   POST /api/threads/{id}/pin — pin/unpin a thread (pinned sort first)
@@ -80,6 +81,18 @@ class RouterResetRequest(BaseModel):
 
 class ThreadRenameRequest(BaseModel):
     title: str = ""
+    access_code: str = ""
+
+
+class ThreadImportRequest(BaseModel):
+    # Mirrors the JSON shape thread_export emits: {"thread": {...},
+    # "messages": [...]}. Extra keys are ignored; the exported id is
+    # never reused (see memory.import_thread). thread/messages are
+    # deliberately untyped here so the endpoint itself can 400 on every
+    # malformed shape, instead of pydantic 422ing some and the handler
+    # 400ing others.
+    thread: object = {}
+    messages: object = []
     access_code: str = ""
 
 
@@ -165,6 +178,35 @@ def thread_search(q: str = "", access_code: str = ""):
     """
     _check_access(access_code)
     return {"threads": memory.search_threads(q)}
+
+
+@app.post("/api/threads/import")
+def thread_import(req: ThreadImportRequest):
+    """Restore a thread from an exported JSON file.
+
+    Registered before /api/threads/{thread_id} so "import" is never
+    treated as a thread id. Auth is checked before any validation, same
+    as the other thread endpoints, so a bad payload cannot probe
+    anything. Malformed payloads 400 with a plain reason instead of
+    importing a half-parsed thread: messages must be a list of objects
+    with string role and content. Title falls back to "untitled" when
+    the export carries none; the 60-char cap comes from create_thread.
+    """
+    _check_access(req.access_code)
+    if not isinstance(req.messages, list):
+        raise HTTPException(status_code=400, detail="messages must be a list")
+    for m in req.messages:
+        if (not isinstance(m, dict)
+                or not isinstance(m.get("role"), str)
+                or not isinstance(m.get("content"), str)):
+            raise HTTPException(
+                status_code=400,
+                detail="each message needs a string role and content")
+    title = req.thread.get("title") if isinstance(req.thread, dict) else None
+    title = title.strip() if isinstance(title, str) else ""
+    new_id = memory.import_thread(title or "untitled", req.messages)
+    return {"imported": True, "thread": memory.get_thread(new_id),
+            "messages": len(req.messages)}
 
 
 @app.get("/api/threads/{thread_id}")

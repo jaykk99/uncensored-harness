@@ -171,6 +171,25 @@ def duplicate_thread(tid: str) -> str | None:
     return new_id
 
 
+def import_thread(title: str, messages: list[dict]) -> str:
+    """Create a new thread from an exported thread's messages, in order.
+
+    Export has existed since the sidebar gained per-thread actions, but
+    there was no way back in: a downloaded .json could be read, never
+    restored — deleting a thread, or moving to a fresh deploy, lost it
+    for good. Import closes that loop. The new thread gets a fresh id
+    (the export's id is never reused, so importing twice cannot collide
+    with the original) and starts unpinned and unarchived, like a
+    duplicate, even if the exported thread was pinned or archived.
+    Callers must validate message shape first; entries here are trusted
+    to carry string role/content.
+    """
+    new_id = create_thread(title or "untitled")
+    for m in messages:
+        add_message(new_id, m["role"], m["content"])
+    return new_id
+
+
 def set_thread_pinned(tid: str, pinned: bool) -> bool:
     """Pin or unpin a thread. Returns False if the thread does not exist."""
     c = _conn()

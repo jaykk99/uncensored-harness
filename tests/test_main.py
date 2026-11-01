@@ -237,6 +237,61 @@ def test_thread_duplicate_copies_and_opens_copy(monkeypatch, tmp_path):
     assert "reopen me (copy)" in titles
 
 
+def test_thread_import_roundtrips_export(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    # Export the thread, then import its JSON: the restored thread is a
+    # new id with the same title and messages, visible in the list.
+    exported = c.get(f"/api/threads/{tid}/export?format=json&access_code={CODE}")
+    assert exported.status_code == 200
+    payload = exported.json()
+    payload["access_code"] = CODE
+    r = c.post("/api/threads/import", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["imported"] is True
+    assert body["messages"] == 2
+    new_id = body["thread"]["id"]
+    assert new_id != tid
+    assert body["thread"]["title"] == "reopen me"
+    assert body["thread"]["pinned"] is False
+    assert body["thread"]["archived"] is False
+    restored = c.get(f"/api/threads/{new_id}?access_code={CODE}").json()
+    assert [(m["role"], m["content"]) for m in restored["messages"]] == [
+        ("user", "first question"), ("assistant", "first answer")]
+    titles = [t["title"] for t in
+              c.get(f"/api/threads?access_code={CODE}").json()["threads"]]
+    assert titles.count("reopen me") == 2
+
+
+def test_thread_import_requires_code_and_validates_payload(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    good = {"thread": {"title": "x"},
+            "messages": [{"role": "user", "content": "hi"}]}
+    r = c.post("/api/threads/import", json={**good, "access_code": "wrong"})
+    assert r.status_code == 401
+    # Auth passes, payload fails: nothing is imported.
+    r = c.post("/api/threads/import",
+               json={"thread": {}, "messages": "not a list",
+                     "access_code": CODE})
+    assert r.status_code == 400
+    r = c.post("/api/threads/import",
+               json={"thread": {},
+                     "messages": [{"role": "user"}],
+                     "access_code": CODE})
+    assert r.status_code == 400
+    r = c.post("/api/threads/import",
+               json={"thread": {},
+                     "messages": [{"role": "user", "content": 42}],
+                     "access_code": CODE})
+    assert r.status_code == 400
+    before = c.get(f"/api/threads?access_code={CODE}").json()["threads"]
+    r = c.post("/api/threads/import", json={**good, "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["thread"]["title"] == "x"
+    after = c.get(f"/api/threads?access_code={CODE}").json()["threads"]
+    assert len(after) == len(before) + 1
+
+
 def test_thread_pin_toggles_sets_and_sorts_first(monkeypatch, tmp_path):
     from app import memory
     c, tid = _thread_client(monkeypatch, tmp_path)

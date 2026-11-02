@@ -81,6 +81,75 @@ def get_history(tid: str, limit: int = 60, offset: int = 0) -> list[dict]:
     return [{"role": r, "content": co} for r, co in reversed(rows)]
 
 
+def get_history_with_ids(tid: str, limit: int = 60,
+                         offset: int = 0) -> list[dict]:
+    """get_history(), plus each message's sqlite row id.
+
+    get_history() deliberately stays {role, content} only — it feeds
+    the model, which needs strict OpenAI message format. But pruning
+    needs an addressable message: the thread-detail endpoint serves
+    this shape to the UI, so a delete/truncate button can name the
+    exact row instead of guessing by position or content (duplicate
+    messages in one thread would make position/content ambiguous).
+    Same paging semantics as get_history().
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    c = _conn()
+    rows = c.execute(
+        "SELECT id, role, content FROM messages WHERE thread_id=? "
+        "ORDER BY id DESC LIMIT ? OFFSET ?",
+        (tid, limit, offset)).fetchall()
+    c.close()
+    return [{"id": r[0], "role": r[1], "content": r[2]}
+            for r in reversed(rows)]
+
+
+def delete_message(tid: str, mid: int) -> bool:
+    """Delete one message. Returns False if that id is not in this thread.
+
+    The thread_id guard matters: message ids are a global sequence, so
+    a bare `DELETE WHERE id=?` would let a caller delete another
+    thread's message by guessing its id. No renumbering afterwards —
+    ids are opaque row addresses, never positions, so the survivors
+    keep their ids and later deletes still name the right rows.
+    """
+    c = _conn()
+    cur = c.execute("DELETE FROM messages WHERE id=? AND thread_id=?",
+                    (mid, tid))
+    deleted = cur.rowcount > 0
+    c.commit()
+    c.close()
+    return deleted
+
+
+def truncate_thread_from(tid: str, mid: int) -> int:
+    """Delete a message and every message after it in this thread.
+
+    The retry case: a bad assistant turn (or a wrong user prompt)
+    poisons everything that follows it, and deleting one message
+    leaves orphan replies that still reference it. Cutting from the
+    bad message onward leaves a clean tail to continue from. Returns
+    how many rows were deleted, 0 when that id is not in this thread
+    (nothing is cut on a miss — a truncate must never silently eat
+    the wrong thread's tail).
+    """
+    c = _conn()
+    anchor = c.execute(
+        "SELECT 1 FROM messages WHERE id=? AND thread_id=?",
+        (mid, tid)).fetchone()
+    if not anchor:
+        c.close()
+        return 0
+    cur = c.execute(
+        "DELETE FROM messages WHERE thread_id=? AND id>=?",
+        (tid, mid))
+    deleted = cur.rowcount
+    c.commit()
+    c.close()
+    return deleted
+
+
 def get_all_messages(tid: str) -> list[dict]:
     """Every message in a thread, oldest-first, with no page cap.
 

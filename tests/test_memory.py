@@ -409,3 +409,63 @@ def test_get_all_messages_empty_and_unknown(memdb):
     tid = memdb.create_thread("t")
     assert memdb.get_all_messages(tid) == []
     assert memdb.get_all_messages("nope-not-real") == []
+
+
+def _prune_thread(memdb):
+    tid = memdb.create_thread("prune me")
+    for role, content in [("user", "q1"), ("assistant", "a1"),
+                          ("user", "q2"), ("assistant", "a2")]:
+        memdb.add_message(tid, role, content)
+    ids = [m["id"] for m in memdb.get_history_with_ids(tid)]
+    assert [m["content"] for m in memdb.get_history_with_ids(tid)] == [
+        "q1", "a1", "q2", "a2"]
+    # get_history itself stays id-free: it feeds the model, which needs
+    # strict OpenAI message format.
+    assert memdb.get_history(tid) == [
+        {"role": r, "content": c} for r, c in
+        [("user", "q1"), ("assistant", "a1"),
+         ("user", "q2"), ("assistant", "a2")]]
+    return tid, ids
+
+
+def test_history_with_ids_pages_like_history(memdb):
+    tid, ids = _prune_thread(memdb)
+    page = memdb.get_history_with_ids(tid, limit=2)
+    assert [m["id"] for m in page] == ids[2:]
+    assert [m["content"] for m in page] == ["q2", "a2"]
+    older = memdb.get_history_with_ids(tid, limit=2, offset=2)
+    assert [m["content"] for m in older] == ["q1", "a1"]
+
+
+def test_delete_message_removes_only_that_row(memdb):
+    tid, ids = _prune_thread(memdb)
+    assert memdb.delete_message(tid, ids[1]) is True
+    assert [m["content"] for m in memdb.get_history(tid)] == [
+        "q1", "q2", "a2"]
+    # Survivors keep their ids: a second delete still names its row.
+    assert memdb.delete_message(tid, ids[3]) is True
+    assert [m["content"] for m in memdb.get_history(tid)] == ["q1", "q2"]
+
+
+def test_delete_message_unknown_or_foreign_is_false(memdb):
+    tid, ids = _prune_thread(memdb)
+    other = memdb.create_thread("other")
+    assert memdb.delete_message(tid, 999999) is False
+    # An id from another thread must not delete anything here.
+    assert memdb.delete_message(other, ids[0]) is False
+    assert len(memdb.get_history(tid)) == 4
+
+
+def test_truncate_thread_from_cuts_anchor_and_tail(memdb):
+    tid, ids = _prune_thread(memdb)
+    assert memdb.truncate_thread_from(tid, ids[2]) == 2
+    assert [m["content"] for m in memdb.get_history(tid)] == ["q1", "a1"]
+
+
+def test_truncate_unknown_or_foreign_cuts_nothing(memdb):
+    tid, ids = _prune_thread(memdb)
+    other = memdb.create_thread("other")
+    assert memdb.truncate_thread_from(tid, 999999) == 0
+    assert memdb.truncate_thread_from(other, ids[1]) == 0
+    assert len(memdb.get_history(tid)) == 4
+    assert memdb.get_history(other) == []

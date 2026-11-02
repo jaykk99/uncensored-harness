@@ -10,6 +10,8 @@ Endpoints:
   POST /api/threads/{id}/duplicate — fork a thread with all its messages
   POST /api/threads/{id}/pin — pin/unpin a thread (pinned sort first)
   POST /api/threads/{id}/archive — archive/unarchive a thread (hidden from the sidebar list)
+  DELETE /api/threads/{id}/messages/{mid} — delete one message
+  POST /api/threads/{id}/messages/{mid}/truncate — delete a message and everything after it
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
@@ -229,8 +231,8 @@ def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     return {"thread": thread,
-            "messages": memory.get_history(thread_id, limit=limit,
-                                           offset=offset),
+            "messages": memory.get_history_with_ids(thread_id, limit=limit,
+                                                    offset=offset),
             "total": memory.count_messages(thread_id)}
 
 
@@ -355,6 +357,46 @@ def thread_archive(thread_id: str, req: ThreadArchiveRequest):
     archived = (not thread["archived"]) if req.archived is None else req.archived
     memory.set_thread_archived(thread_id, archived)
     return {"archived": archived, "thread": memory.get_thread(thread_id)}
+
+
+@app.delete("/api/threads/{thread_id}/messages/{message_id}")
+def thread_message_delete(thread_id: str, message_id: int,
+                          access_code: str = ""):
+    """Delete one message from a thread, leaving the rest intact.
+
+    Auth is checked before the lookup so a wrong code cannot probe
+    whether a thread or message id exists, same as the other thread
+    endpoints. Unknown thread and unknown-in-this-thread message both
+    404; a message id from another thread never deletes here (see
+    memory.delete_message's thread_id guard).
+    """
+    _check_access(access_code)
+    if memory.get_thread(thread_id) is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    if not memory.delete_message(thread_id, message_id):
+        raise HTTPException(status_code=404, detail="no such message")
+    return {"deleted": True, "message_id": message_id,
+            "remaining": memory.count_messages(thread_id)}
+
+
+@app.post("/api/threads/{thread_id}/messages/{message_id}/truncate")
+def thread_message_truncate(thread_id: str, message_id: int,
+                            req: ThreadAccessRequest):
+    """Cut a thread off at a message: delete it and everything after.
+
+    The retry case for a bad turn — deleting one message alone leaves
+    orphan replies that still reference it. Auth, then thread, then
+    message existence are checked in that order, so a wrong code or a
+    foreign message id can never cut a thread it does not own.
+    """
+    _check_access(req.access_code)
+    if memory.get_thread(thread_id) is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    deleted = memory.truncate_thread_from(thread_id, message_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="no such message")
+    return {"truncated": True, "deleted": deleted,
+            "remaining": memory.count_messages(thread_id)}
 
 
 @app.delete("/api/threads/{thread_id}")

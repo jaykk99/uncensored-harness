@@ -193,6 +193,65 @@ def test_thread_delete_removes_and_404s_after(monkeypatch, tmp_path):
     assert r.status_code == 404
 
 
+def test_thread_detail_messages_carry_ids(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    body = c.get(f"/api/threads/{tid}?access_code={CODE}").json()
+    assert all("id" in m for m in body["messages"])
+    assert [m["content"] for m in body["messages"]] == [
+        "first question", "first answer"]
+
+
+def _prune_client(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for role, content in [("user", "q1"), ("assistant", "a1"),
+                          ("user", "q2"), ("assistant", "a2")]:
+        memory.add_message(tid, role, content)
+    # _thread_client seeds "first question"/"first answer" first; the
+    # prune targets are the four messages added above, in order.
+    all_msgs = c.get(
+        f"/api/threads/{tid}?access_code={CODE}").json()["messages"]
+    ids = [m["id"] for m in all_msgs
+           if m["content"] in ("q1", "a1", "q2", "a2")]
+    assert [m["content"] for m in all_msgs][-4:] == ["q1", "a1", "q2", "a2"]
+    return c, tid, ids
+
+
+def test_thread_message_delete_prunes_one(monkeypatch, tmp_path):
+    c, tid, ids = _prune_client(monkeypatch, tmp_path)
+    r = c.delete(f"/api/threads/{tid}/messages/{ids[1]}?access_code=wrong")
+    assert r.status_code == 401
+    r = c.delete(f"/api/threads/nope-not-real/messages/{ids[1]}?access_code={CODE}")
+    assert r.status_code == 404
+    r = c.delete(f"/api/threads/{tid}/messages/999999?access_code={CODE}")
+    assert r.status_code == 404
+    r = c.delete(f"/api/threads/{tid}/messages/{ids[1]}?access_code={CODE}")
+    assert r.status_code == 200
+    assert r.json()["remaining"] == 5
+    body = c.get(f"/api/threads/{tid}?access_code={CODE}").json()
+    assert [m["content"] for m in body["messages"]] == [
+        "first question", "first answer", "q1", "q2", "a2"]
+
+
+def test_thread_message_truncate_cuts_tail(monkeypatch, tmp_path):
+    c, tid, ids = _prune_client(monkeypatch, tmp_path)
+    r = c.post(f"/api/threads/{tid}/messages/{ids[2]}/truncate",
+               json={"access_code": "wrong"})
+    assert r.status_code == 401
+    r = c.post(f"/api/threads/{tid}/messages/999999/truncate",
+               json={"access_code": CODE})
+    assert r.status_code == 404
+    r = c.post(f"/api/threads/{tid}/messages/{ids[2]}/truncate",
+               json={"access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["deleted"] == 2
+    assert r.json()["remaining"] == 4
+    body = c.get(f"/api/threads/{tid}?access_code={CODE}").json()
+    assert [m["content"] for m in body["messages"]] == [
+        "first question", "first answer", "q1", "a1"]
+
+
 def test_thread_rename_updates_list(monkeypatch, tmp_path):
     c, tid = _thread_client(monkeypatch, tmp_path)
     r = c.patch(f"/api/threads/{tid}", json={"title": "  ", "access_code": CODE})

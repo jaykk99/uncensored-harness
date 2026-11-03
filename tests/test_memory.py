@@ -341,6 +341,50 @@ def test_search_finds_message_less_thread_by_title(memdb):
     assert hits[0]["pinned"] is False
 
 
+def test_search_thread_messages_returns_ids_positions_snippets(memdb):
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "first about bananas")
+    memdb.add_message(tid, "assistant", "unrelated reply")
+    memdb.add_message(tid, "user", "second BANANAS note")
+    other = memdb.create_thread("u")
+    memdb.add_message(other, "user", "bananas elsewhere")
+    res = memdb.search_thread_messages(tid, "bananas")
+    # Only this thread's hits, oldest-first, with thread positions
+    # (1 and 3 — the unrelated middle message still counts).
+    assert res["total"] == 2
+    assert res["thread_total"] == 3
+    assert [(m["position"], m["role"]) for m in res["matches"]] == [
+        (1, "user"), (3, "user")]
+    assert all("bananas" in m["snippet"].lower() for m in res["matches"])
+    assert all("id" in m for m in res["matches"])
+
+
+def test_search_thread_messages_empty_wildcards_and_limit(memdb):
+    tid = memdb.create_thread("t")
+    for i in range(5):
+        memdb.add_message(tid, "user", f"commonword {i}")
+    memdb.add_message(tid, "user", "100% sure")
+    assert memdb.search_thread_messages(tid, "")["matches"] == []
+    assert memdb.search_thread_messages(tid, "   ")["total"] == 0
+    assert memdb.search_thread_messages(tid, "zzz-no-match")["total"] == 0
+    # A literal "%" matches only the message that contains one.
+    pct = memdb.search_thread_messages(tid, "%")
+    assert pct["total"] == 1 and "%" in pct["matches"][0]["snippet"]
+    assert memdb.search_thread_messages(tid, "_")["total"] == 0
+    # total counts every match even when limit caps the returned list.
+    capped = memdb.search_thread_messages(tid, "commonword", limit=2)
+    assert capped["total"] == 5 and len(capped["matches"]) == 2
+
+
+def test_search_thread_messages_snippet_windows_around_match(memdb):
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "x" * 100 + "needle" + "y" * 100)
+    hit = memdb.search_thread_messages(tid, "needle")["matches"][0]
+    assert hit["snippet"].startswith("...")
+    assert "needle" in hit["snippet"]
+    assert len(hit["snippet"]) < 200  # windowed, not the whole message
+
+
 def test_get_all_messages_returns_everything_in_order(memdb):
     tid = memdb.create_thread("t")
     for i in range(5):

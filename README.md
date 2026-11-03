@@ -78,7 +78,7 @@ Gmail needs the one-time Google connect (OAuth consent with offline access) to m
 
 ## Capabilities
 
-- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar (reopen a past thread with its full history, rename, delete, search titles and message content, load older messages on long threads, delete one message or cut a thread from a message onward)
+- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar (reopen a past thread with its full history, rename, delete, search titles and message content, search within an open thread with prev/next jumps, load older messages on long threads, delete one message or cut a thread from a message onward)
 - Terminal + filesystem, sandboxed to `HARNESS_WORKDIR` (default `~/harness-work`); path escapes rejected
 - Web search (Bing RSS primary, DuckDuckGo fallback) + fetch, with SSRF guards (no localhost/private IPs/metadata hosts)
 - Controlled headless browser (open/click/fill/text) with automatic screenshots (Playwright)
@@ -99,6 +99,7 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `GET /api/threads` — list threads
 - `GET /api/threads/search?q=` — search thread titles and message content (returns a match snippet per thread)
 - `GET /api/threads/{id}` — reopen a thread with its stored messages (clicking a sidebar thread used to clear the pane and show nothing; this endpoint is what loads it back)
+- `GET /api/threads/{id}/messages/search?q=` — search within one thread's messages (row id, thread position, and match snippet per hit, oldest-first)
 - `DELETE /api/threads/{id}` — delete a thread and its messages
 - `DELETE /api/threads/{id}/messages/{mid}` — delete one message from a thread
 - `POST /api/threads/{id}/messages/{mid}/truncate` — delete a message and everything after it (retry a bad turn)
@@ -125,7 +126,7 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-290 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, router stats, and thread reopen/delete/rename/search/message-prune. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
+296 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, router stats, and thread reopen/delete/rename/search/message-prune/in-thread-search. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
 
 ## Architecture
 

@@ -315,6 +315,58 @@ def list_archived_threads() -> list[dict]:
              "pinned": bool(r[3]), "archived": bool(r[4])} for r in rows]
 
 
+def search_thread_messages(tid: str, query: str,
+                           limit: int = 50) -> dict:
+    """Search inside one thread's messages, oldest-first.
+
+    The sidebar search finds *threads* by content, but once a long
+    thread is open there was no way to find a message *within* it:
+    reopening only shows the newest 60, so an older turn meant paging
+    back by hand and eyeballing. A hit carries its sqlite row id (the
+    same address delete/truncate use, so the UI can jump straight to
+    it), its 1-based position in the thread (oldest = 1, for paging
+    math), and a snippet around the match, same windowing as
+    search_threads. LIKE wildcards are escaped, so a literal "%" does
+    not match everything. `total` counts every matching message even
+    when `limit` caps the returned list; `thread_total` is the whole
+    thread, so the UI can tell a capped result from a complete one.
+    """
+    q = (query or "").strip()
+    thread_total = count_messages(tid)
+    if not q:
+        return {"matches": [], "total": 0, "thread_total": thread_total}
+    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pat = f"%{esc}%"
+    limit = max(1, min(limit, 50))
+    c = _conn()
+    rows = c.execute(
+        "SELECT id, role, content FROM messages WHERE thread_id=? "
+        "AND content LIKE ? ESCAPE '\\' ORDER BY id ASC",
+        (tid, pat)).fetchall()
+    # Position is the message's place in the whole thread (oldest = 1),
+    # not its place among the matches: the UI uses it to tell whether
+    # the match is already on screen or still in an older page.
+    positions = {mid: pos for pos, (mid,) in enumerate(
+        c.execute("SELECT id FROM messages WHERE thread_id=? "
+                  "ORDER BY id ASC", (tid,)).fetchall(), start=1)}
+    c.close()
+    total = len(rows)
+    matches = []
+    for mid, role, content in rows[:limit]:
+        pos = positions.get(mid, 0)
+        idx = content.lower().find(q.lower())
+        if idx < 0:
+            snippet = (content or "")[:120]
+        else:
+            start = max(0, idx - 40)
+            snippet = content[start:idx + len(q) + 80].replace("\n", " ")
+            snippet = ("..." if start > 0 else "") + snippet
+        matches.append({"id": mid, "role": role, "position": pos,
+                        "snippet": snippet})
+    return {"matches": matches, "total": total,
+            "thread_total": thread_total}
+
+
 def search_threads(query: str, limit: int = 20) -> list[dict]:
     """Find threads by title or message content.
 

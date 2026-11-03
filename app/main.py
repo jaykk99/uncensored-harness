@@ -12,6 +12,7 @@ Endpoints:
   POST /api/threads/{id}/archive — archive/unarchive a thread (hidden from the sidebar list)
   DELETE /api/threads/{id}/messages/{mid} — delete one message
   POST /api/threads/{id}/messages/{mid}/truncate — delete a message and everything after it
+  GET  /api/threads/{id}/messages/search — search within one thread's messages
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
@@ -234,6 +235,26 @@ def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
             "messages": memory.get_history_with_ids(thread_id, limit=limit,
                                                     offset=offset),
             "total": memory.count_messages(thread_id)}
+
+
+@app.get("/api/threads/{thread_id}/messages/search")
+def thread_message_search(thread_id: str, q: str = "",
+                          access_code: str = "", limit: int = 50):
+    """Search within one thread's messages, oldest-first.
+
+    The sidebar /api/threads/search finds threads; this finds a turn
+    inside the thread already open, which is what a long reopened chat
+    actually needs. Auth, then thread existence, are checked in that
+    order, same as the other thread endpoints, so a wrong code or an
+    unknown id cannot probe anything. `limit` clamps like the other
+    paged endpoints; `total` still reports every match.
+    """
+    _check_access(access_code)
+    if memory.get_thread(thread_id) is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    limit = max(1, min(limit, 50))
+    result = memory.search_thread_messages(thread_id, q, limit=limit)
+    return {"thread_id": thread_id, "query": (q or "").strip(), **result}
 
 
 def _thread_markdown(thread: dict, messages: list[dict]) -> str:

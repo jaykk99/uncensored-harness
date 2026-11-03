@@ -466,6 +466,51 @@ def test_thread_search_route_is_not_a_thread_id(monkeypatch, tmp_path):
     assert r.status_code == 200
 
 
+def test_thread_message_search_requires_code_and_thread(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/{tid}/messages/search?q=first")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/{tid}/messages/search?q=first&access_code=wrong")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/nope-not-real/messages/search?q=first&access_code={CODE}")
+    assert r.status_code == 404
+
+
+def test_thread_message_search_finds_within_thread_only(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    other = memory.create_thread("other")
+    memory.add_message(other, "user", "needle elsewhere")
+    memory.add_message(tid, "assistant", "a needle answer here")
+    r = c.get(f"/api/threads/{tid}/messages/search?q=needle&access_code={CODE}")
+    assert r.status_code == 200
+    body = r.json()
+    # Only this thread's match, at thread position 3 — the other
+    # thread's match never leaks in.
+    assert body["total"] == 1
+    assert body["thread_total"] == 3
+    assert [m["position"] for m in body["matches"]] == [3]
+    assert [m["role"] for m in body["matches"]] == ["assistant"]
+    assert all("needle" in m["snippet"].lower() for m in body["matches"])
+    r = c.get(f"/api/threads/{tid}/messages/search?q=zzz-no-match&access_code={CODE}")
+    assert r.json()["matches"] == [] and r.json()["total"] == 0
+    r = c.get(f"/api/threads/{tid}/messages/search?access_code={CODE}")
+    assert r.json()["matches"] == []
+
+
+def test_thread_message_search_limit_clamped(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(3):
+        memory.add_message(tid, "user", f"commonword {i}")
+    body = c.get(
+        f"/api/threads/{tid}/messages/search?q=commonword&limit=2&access_code={CODE}").json()
+    assert body["total"] == 3 and len(body["matches"]) == 2
+    body = c.get(
+        f"/api/threads/{tid}/messages/search?q=commonword&limit=999&access_code={CODE}").json()
+    assert len(body["matches"]) == 3  # clamped to 50, not 999
+
+
 def test_thread_export_markdown_download(monkeypatch, tmp_path):
     c, tid = _thread_client(monkeypatch, tmp_path)
     r = c.get(f"/api/threads/{tid}/export?access_code={CODE}")

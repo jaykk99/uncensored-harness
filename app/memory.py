@@ -82,7 +82,8 @@ def get_history(tid: str, limit: int = 60, offset: int = 0) -> list[dict]:
 
 
 def get_history_with_ids(tid: str, limit: int = 60,
-                         offset: int = 0) -> list[dict]:
+                         offset: int = 0,
+                         before_id: int | None = None) -> list[dict]:
     """get_history(), plus each message's sqlite row id.
 
     get_history() deliberately stays {role, content} only — it feeds
@@ -92,14 +93,31 @@ def get_history_with_ids(tid: str, limit: int = 60,
     exact row instead of guessing by position or content (duplicate
     messages in one thread would make position/content ambiguous).
     Same paging semantics as get_history().
+
+    `before_id` pages by cursor instead of by offset: the page is the
+    `limit` messages with a smaller id. Offset paging counts on-screen
+    messages, which breaks mid-turn — a live turn puts bubbles on
+    screen that are not stored yet (the streaming assistant reply) or
+    not tagged yet (the just-sent user message), so the offset drifts
+    and a page can skip or duplicate a stored message. A cursor names
+    an exact stored row, so paging stays exact no matter what live
+    bubbles are on screen. When `before_id` is given it wins over
+    `offset`.
     """
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     c = _conn()
-    rows = c.execute(
-        "SELECT id, role, content FROM messages WHERE thread_id=? "
-        "ORDER BY id DESC LIMIT ? OFFSET ?",
-        (tid, limit, offset)).fetchall()
+    if before_id is not None:
+        rows = c.execute(
+            "SELECT id, role, content FROM messages "
+            "WHERE thread_id=? AND id<? "
+            "ORDER BY id DESC LIMIT ?",
+            (tid, before_id, limit)).fetchall()
+    else:
+        rows = c.execute(
+            "SELECT id, role, content FROM messages WHERE thread_id=? "
+            "ORDER BY id DESC LIMIT ? OFFSET ?",
+            (tid, limit, offset)).fetchall()
     c.close()
     return [{"id": r[0], "role": r[1], "content": r[2]}
             for r in reversed(rows)]

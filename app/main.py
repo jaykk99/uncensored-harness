@@ -214,7 +214,7 @@ def thread_import(req: ThreadImportRequest):
 
 @app.get("/api/threads/{thread_id}")
 def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
-                  offset: int = 0):
+                  offset: int = 0, before_id: int | None = None):
     """One thread with its messages, for reopening it in the UI.
 
     Until now the sidebar only listed threads: clicking one cleared the
@@ -223,7 +223,12 @@ def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
     cannot probe whether a thread id exists.
     `offset` pages backwards (skip that many of the newest messages) so
     a thread longer than `limit` can be read in full; `total` tells the
-    UI whether older messages remain.
+    UI whether older messages remain. `before_id` pages by cursor
+    instead (the `limit` messages older than that row id) and wins over
+    `offset` when given: offset paging drifts mid-turn, when live
+    bubbles on screen are not stored/tagged yet, while a cursor stays
+    exact. The UI pages with the cursor so in-thread search jumps stay
+    correct during a live turn.
     """
     _check_access(access_code)
     thread = memory.get_thread(thread_id)
@@ -233,7 +238,8 @@ def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
     offset = max(0, offset)
     return {"thread": thread,
             "messages": memory.get_history_with_ids(thread_id, limit=limit,
-                                                    offset=offset),
+                                                    offset=offset,
+                                                    before_id=before_id),
             "total": memory.count_messages(thread_id)}
 
 

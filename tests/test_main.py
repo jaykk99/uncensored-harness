@@ -549,3 +549,32 @@ def test_thread_export_guards(monkeypatch, tmp_path):
     assert r.status_code == 404
     r = c.get(f"/api/threads/{tid}/export?format=pdf&access_code={CODE}")
     assert r.status_code == 400
+
+
+def test_thread_detail_before_id_pages_and_reports_total(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(3):
+        memory.add_message(tid, "user", f"extra-{i}")
+    body = c.get(f"/api/threads/{tid}?access_code={CODE}&limit=2").json()
+    assert body["total"] == 5
+    assert [m["content"] for m in body["messages"]] == ["extra-1", "extra-2"]
+    cursor = body["messages"][0]["id"]
+    older = c.get(
+        f"/api/threads/{tid}?access_code={CODE}&limit=2&before_id={cursor}").json()
+    assert older["total"] == 5
+    assert [m["content"] for m in older["messages"]] == ["first answer", "extra-0"]
+    first_id = older["messages"][0]["id"]
+    oldest = c.get(
+        f"/api/threads/{tid}?access_code={CODE}&limit=2&before_id={first_id}").json()
+    assert [m["content"] for m in oldest["messages"]] == ["first question"]
+    # Cursor beats offset: offset=0 alone would return the newest page.
+    again = c.get(
+        f"/api/threads/{tid}?access_code={CODE}&limit=2&offset=0"
+        f"&before_id={cursor}").json()
+    assert [m["content"] for m in again["messages"]] == ["first answer", "extra-0"]
+    # Auth still checked before the lookup, like the other thread routes.
+    r = c.get(f"/api/threads/{tid}?access_code=wrong&before_id={cursor}")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/nope-not-real?access_code={CODE}&before_id={cursor}")
+    assert r.status_code == 404

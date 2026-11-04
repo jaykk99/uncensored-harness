@@ -98,8 +98,8 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `GET /api/models` — model list grouped by provider, with live key status
 - `GET /api/threads` — list threads
 - `GET /api/threads/search?q=` — search thread titles and message content (returns a match snippet per thread)
-- `GET /api/threads/{id}` — reopen a thread with its stored messages (clicking a sidebar thread used to clear the pane and show nothing; this endpoint is what loads it back)
-- `GET /api/threads/{id}/messages/search?q=` — search within one thread's messages (row id, thread position, and match snippet per hit, oldest-first)
+- `GET /api/threads/{id}` — reopen a thread with its stored messages (clicking a sidebar thread used to clear the pane and show nothing; this endpoint is what loads it back). `before_id` pages by cursor (the `limit` messages older than that row id) and wins over `offset`: the UI pages with the cursor so "load older" stays exact during a live turn, when untagged live bubbles would throw an on-screen count off
+- `GET /api/threads/{id}/messages/search?q=` — search within one thread's messages (row id, thread position, and match snippet per hit, oldest-first). The find bar appears as soon as a live turn assigns a thread id, not only on reopen, so search works mid-turn over everything already stored; a jump to a still-streaming match waits for the turn to finish instead of reopening and wiping the stream
 - `DELETE /api/threads/{id}` — delete a thread and its messages
 - `DELETE /api/threads/{id}/messages/{mid}` — delete one message from a thread
 - `POST /api/threads/{id}/messages/{mid}/truncate` — delete a message and everything after it (retry a bad turn)
@@ -126,7 +126,7 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-296 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, router stats, and thread reopen/delete/rename/search/message-prune/in-thread-search. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
+299 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, router stats, and thread reopen/delete/rename/search/message-prune/in-thread-search. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
 
 ## Architecture
 

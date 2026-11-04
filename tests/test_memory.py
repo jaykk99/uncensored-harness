@@ -513,3 +513,32 @@ def test_truncate_unknown_or_foreign_cuts_nothing(memdb):
     assert memdb.truncate_thread_from(other, ids[1]) == 0
     assert len(memdb.get_history(tid)) == 4
     assert memdb.get_history(other) == []
+
+
+def test_history_with_ids_before_id_walks_to_first_message(memdb):
+    tid, ids = _prune_thread(memdb)
+    # Newest page, then cursor pages walk back disjointly to the start.
+    page = memdb.get_history_with_ids(tid, limit=2)
+    assert [m["id"] for m in page] == ids[2:]
+    older = memdb.get_history_with_ids(tid, limit=2, before_id=page[0]["id"])
+    assert [m["id"] for m in older] == ids[:2]
+    assert [m["content"] for m in older] == ["q1", "a1"]
+    assert memdb.get_history_with_ids(
+        tid, limit=2, before_id=older[0]["id"]) == []
+
+
+def test_history_with_ids_before_id_wins_over_offset(memdb):
+    tid, ids = _prune_thread(memdb)
+    # offset=0 alone would return the newest page; the cursor must win.
+    page = memdb.get_history_with_ids(tid, limit=2, offset=0,
+                                      before_id=ids[2])
+    assert [m["content"] for m in page] == ["q1", "a1"]
+    # Ids are a global sequence, so a cursor from another thread is
+    # still just an id comparison — but rows stay scoped to this
+    # thread: the other thread's message must never leak in.
+    other = memdb.create_thread("other")
+    memdb.add_message(other, "user", "elsewhere")
+    other_id = memdb.get_history_with_ids(other)[0]["id"]
+    page = memdb.get_history_with_ids(tid, limit=2, before_id=other_id)
+    assert [m["content"] for m in page] == ["q2", "a2"]
+    assert all(m["content"] != "elsewhere" for m in page)

@@ -1175,7 +1175,19 @@ async function send() {
         if (!line.startsWith("data:")) continue;
         let ev;
         try { ev = JSON.parse(line.slice(5)); } catch (e) { continue; }
-        if (ev.type === "thread") threadId = ev.thread_id;
+        if (ev.type === "thread") {
+          // The find bar used to appear only on openThread(), so a
+          // fresh chat had no in-thread search during (or after) its
+          // first live turn until the thread was reopened from the
+          // sidebar. A live turn is when the thread id first becomes
+          // known, so show the bar here too. A changed id means a
+          // different thread: drop the old thread's matches.
+          if (msgSearchThreadId !== ev.thread_id) {
+            clearMsgSearch(); msgSearchThreadId = ev.thread_id;
+          }
+          threadId = ev.thread_id;
+          $("msgsearch").classList.add("visible");
+        }
         else if (ev.type === "thinking") setThinking(bubble, ev.text);
         else if (ev.type === "text" || ev.type === "token") appendText(bubble, ev.text);
         else if (ev.type === "tool") appendTool(bubble, ev.name, ev.args);
@@ -1249,9 +1261,16 @@ async function loadOlderMessages() {
   const prevText = b.textContent;
   b.disabled = true; b.textContent = "Loading...";
   try {
-    const shownNow = chat.querySelectorAll(".msg").length;
+    // Page by cursor, not by on-screen count: mid-turn the transcript
+    // holds bubbles that are not stored yet (the streaming reply) or
+    // not tagged yet (the just-sent message), so an offset counted
+    // from .msg elements drifts and a page can skip or duplicate a
+    // stored message. The oldest tagged id is an exact stored row.
+    const oldestTagged = chat.querySelector("[data-msg-id]");
+    if (!oldestTagged) return false;
+    const cursor = oldestTagged.dataset.msgId;
     const r = await fetch("/api/threads/" + encodeURIComponent(threadId) +
-      "?access_code=" + encodeURIComponent(AC) + "&offset=" + shownNow);
+      "?access_code=" + encodeURIComponent(AC) + "&limit=60&before_id=" + cursor);
     if (!r.ok) throw new Error("load failed");
     const d = await r.json();
     const older = d.messages || [];
@@ -1271,7 +1290,10 @@ async function loadOlderMessages() {
       chat.insertBefore(chat.lastElementChild, anchor);
     });
     chat.scrollTop = chat.scrollHeight - beforeH;
-    loadOlderBtn(d.total, chat.querySelectorAll(".msg").length);
+    // A short page means the thread is exhausted even if the .msg
+    // count (inflated by untagged live bubbles) has not reached total.
+    if (older.length < 60) { const old = $("loadolderbtn"); if (old) old.remove(); }
+    else loadOlderBtn(d.total, chat.querySelectorAll(".msg").length);
     return true;
   } catch (e) {
     toast("Could not load older messages.", true);
@@ -1318,7 +1340,12 @@ async function openThread(id) {
    out, meaning the whole thread is loaded and the match is gone,
    e.g. deleted since the search ran). A match from a live turn has
    no id on screen until the thread is reopened, so the jump reloads
-   the thread once in that case — same id rule as delete/truncate. */
+   the thread once in that case — same id rule as delete/truncate —
+   except mid-turn, where reopening would wipe the streaming bubble:
+   there the jump stops with a toast instead. The bar itself appears
+   as soon as a live turn assigns a thread id, not only on reopen, so
+   search works mid-turn over everything already stored (the streaming
+   reply itself is searchable once the turn finishes and is stored). */
 let msgSearchMatches = [], msgSearchIdx = -1, msgSearchThreadId = "";
 let msgSearchTotal = 0;
 let msgSearchTimer = null, msgSearchBusy = false;
@@ -1362,6 +1389,13 @@ async function jumpToMsgSearchMatch(idx) {
     }
     // Live-turn message with no id on screen yet: one reopen gives
     // every message an id, then page back again if it is older.
+    // Never reopen mid-turn: openThread clears the transcript, which
+    // would wipe the streaming bubble. The match gets its id when
+    // the turn finishes and is stored; searching again then works.
+    if (!el && sending) {
+      toast("That match is still streaming — search again when the turn finishes.", true);
+      return;
+    }
     if (!el) {
       await openThread(threadId);
       el = document.querySelector('[data-msg-id="' + target.id + '"]');

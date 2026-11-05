@@ -195,6 +195,37 @@ def count_messages(tid: str) -> int:
     return int(row[0]) if row else 0
 
 
+def message_position(tid: str, mid: int) -> dict | None:
+    """1-based position of one message in its thread (oldest = 1).
+
+    In-thread search used to jump to a match by paging back 60
+    messages at a time, capped at 100 pages — a match more than
+    ~6,000 messages back was unreachable. A position is a COUNT of
+    the messages older than this row, so the UI can fetch the exact
+    60-message window holding the match in one request instead of
+    walking the whole thread. Returns None when that row id is not
+    in this thread: ids are a global sequence, so a foreign id must
+    never resolve to a position here. `total` rides along so the
+    caller can tell a stale position (messages deleted since the
+    search ran) from a live one.
+    """
+    c = _conn()
+    anchor = c.execute(
+        "SELECT 1 FROM messages WHERE id=? AND thread_id=?",
+        (mid, tid)).fetchone()
+    if not anchor:
+        c.close()
+        return None
+    older = c.execute(
+        "SELECT COUNT(*) FROM messages WHERE thread_id=? AND id<?",
+        (tid, mid)).fetchone()
+    total = c.execute(
+        "SELECT COUNT(*) FROM messages WHERE thread_id=?",
+        (tid,)).fetchone()
+    c.close()
+    return {"position": int(older[0]) + 1, "total": int(total[0])}
+
+
 def get_thread(tid: str) -> dict | None:
     c = _conn()
     row = c.execute(

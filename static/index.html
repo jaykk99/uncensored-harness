@@ -1236,19 +1236,44 @@ document.querySelectorAll("#welcome .tip").forEach(t => {
    /api/threads/{id}?offset= until the whole thread is on screen.
    Previously anything older than 60 messages was silently unreachable
    on reopen. The button is not a .msg, so newChat()'s cleanup leaves
-   it alone — openThread removes any stale one up front. */
-function loadOlderBtn(total, shown) {
+   it alone — openThread removes any stale one up front.
+   The button counts messages older than the oldest on screen, not
+   messages on screen: a find jump can land mid-thread, where the
+   loaded window is not a suffix of the thread, so "total minus
+   shown" would count the newer unloaded messages as older ones.
+   `olderRemaining` is that count, set here and decremented as pages
+   load, so the label stays right after a mid-thread jump too. */
+let olderRemaining = 0;
+function loadOlderBtn(older) {
   const old = $("loadolderbtn");
   if (old) old.remove();
-  if (!total || shown >= total) return;
+  olderRemaining = Math.max(0, older || 0);
+  if (!olderRemaining) return;
   const b = document.createElement("button");
   b.id = "loadolderbtn"; b.className = "pbtn";
   b.style.cssText = "display:block;margin:0 auto 12px;";
-  b.textContent = "Load older messages (" + (total - shown) + " more)";
+  b.textContent = "Load older messages (" + olderRemaining + " more)";
   b.onclick = () => loadOlderMessages();
   const firstMsg = chat.querySelector(".msg");
   if (firstMsg) chat.insertBefore(b, firstMsg);
   else chat.appendChild(b);
+}
+/* Render one fetched page of messages into the transcript, in order.
+   Shared by openThread (newest page) and by a find jump (the window
+   holding the match): both clear the transcript first, so a jump
+   never leaves stale bubbles above the window. */
+function renderThreadMessages(msgs) {
+  chat.querySelectorAll(".msg").forEach(e => e.remove());
+  const staleBtn = $("loadolderbtn");
+  if (staleBtn) staleBtn.remove();
+  (msgs || []).forEach(m => {
+    if (m.role === "user") { addMsgTools(addUser(m.content), m.id); return; }
+    const bubble = newAssistant();
+    bubble.innerHTML = renderMarkdown(m.content);
+    decorateCodeBlocks(bubble);
+    addPreviewButtons(bubble);
+    addMsgTools(bubble.parentElement, m.id);
+  });
 }
 /* One older page, shared by the button and by in-thread search jumps:
    the button used to own this body inline, so a search jump could not
@@ -1292,8 +1317,11 @@ async function loadOlderMessages() {
     chat.scrollTop = chat.scrollHeight - beforeH;
     // A short page means the thread is exhausted even if the .msg
     // count (inflated by untagged live bubbles) has not reached total.
-    if (older.length < 60) { const old = $("loadolderbtn"); if (old) old.remove(); }
-    else loadOlderBtn(d.total, chat.querySelectorAll(".msg").length);
+    if (older.length < 60) {
+      const old = $("loadolderbtn"); if (old) old.remove();
+      olderRemaining = 0;
+    }
+    else loadOlderBtn(olderRemaining - older.length);
     return true;
   } catch (e) {
     toast("Could not load older messages.", true);
@@ -1314,19 +1342,9 @@ async function openThread(id) {
     msgSearchThreadId = d.thread.id;
     threadId = d.thread.id;
     $("msgsearch").classList.add("visible");
-    chat.querySelectorAll(".msg").forEach(e => e.remove());
-    const staleBtn = $("loadolderbtn");
-    if (staleBtn) staleBtn.remove();
+    renderThreadMessages(d.messages);
     $("welcome").style.display = "none";
-    (d.messages || []).forEach(m => {
-      if (m.role === "user") { addMsgTools(addUser(m.content), m.id); return; }
-      const bubble = newAssistant();
-      bubble.innerHTML = renderMarkdown(m.content);
-      decorateCodeBlocks(bubble);
-      addPreviewButtons(bubble);
-      addMsgTools(bubble.parentElement, m.id);
-    });
-    loadOlderBtn(d.total, (d.messages || []).length);
+    loadOlderBtn(d.total - (d.messages || []).length);
     chat.scrollTop = chat.scrollHeight;
     loadThreads(); closeDrawer();
   } catch (e) { toast("Could not open thread.", true); }
@@ -1334,20 +1352,24 @@ async function openThread(id) {
 /* ================= in-thread message search ================= */
 /* Sidebar search finds threads; this finds a turn inside the thread
    already open. Matches come from /messages/search oldest-first with
-   row ids, so prev/next can jump straight to a message. A match older
-   than the newest 60 is not on screen yet: the jump pages backwards
-   through loadOlderMessages until it appears (or the button runs
-   out, meaning the whole thread is loaded and the match is gone,
-   e.g. deleted since the search ran). A match from a live turn has
-   no id on screen until the thread is reopened, so the jump reloads
-   the thread once in that case — same id rule as delete/truncate —
-   except mid-turn, where reopening would wipe the streaming bubble:
-   there the jump stops with a toast instead. The bar itself appears
-   as soon as a live turn assigns a thread id, not only on reopen, so
-   search works mid-turn over everything already stored (the streaming
-   reply itself is searchable once the turn finishes and is stored). */
+   row ids and 1-based thread positions, so prev/next can jump
+   straight to a message. A match older than the newest 60 is not on
+   screen yet: the jump fetches the 60-message window ending at the
+   match (offset = thread total - position, so the match is the
+   newest message of the fetched page) in one request. Paging back
+   page by page used to cap at 100 pages, so a match more than
+   ~6,000 messages back was unreachable and a 5,000-message jump
+   needed ~84 requests; the direct window has no cap. A match from a
+   live turn has no id on screen until the thread is reopened, so the
+   jump reloads the thread once in that case — same id rule as
+   delete/truncate — except mid-turn, where reopening would wipe the
+   streaming bubble: there the jump stops with a toast instead. The
+   bar itself appears as soon as a live turn assigns a thread id, not
+   only on reopen, so search works mid-turn over everything already
+   stored (the streaming reply itself is searchable once the turn
+   finishes and is stored). */
 let msgSearchMatches = [], msgSearchIdx = -1, msgSearchThreadId = "";
-let msgSearchTotal = 0;
+let msgSearchTotal = 0, msgSearchThreadTotal = 0;
 let msgSearchTimer = null, msgSearchBusy = false;
 function clearMsgSearch() {
   msgSearchMatches = []; msgSearchIdx = -1;
@@ -1380,12 +1402,42 @@ async function jumpToMsgSearchMatch(idx) {
     msgSearchIdx = (idx + msgSearchMatches.length) % msgSearchMatches.length;
     const target = msgSearchMatches[msgSearchIdx];
     let el = document.querySelector('[data-msg-id="' + target.id + '"]');
+    // Direct window jump: the search already reported the match's
+    // 1-based position, so one offset fetch lands on it instead of
+    // paging back a page at a time. Skipped mid-turn: a turn
+    // finishing mid-jump stores two more messages and the offset
+    // drifts by two, so a live turn keeps the cursor paging below,
+    // which names exact rows. A stale position (messages deleted
+    // since the search ran) just misses and falls through to the
+    // paging loop, which is exact.
+    if (!el && !sending && target.position && msgSearchThreadTotal) {
+      const offset = Math.max(0, msgSearchThreadTotal - target.position);
+      try {
+        const r = await fetch("/api/threads/" + encodeURIComponent(threadId) +
+          "?access_code=" + encodeURIComponent(AC) + "&limit=60&offset=" + offset);
+        if (r.ok) {
+          const d = await r.json();
+          renderThreadMessages(d.messages);
+          // The window ends at the match, so it starts at position
+          // max(1, target.position - 59): everything older than that
+          // is still behind the Load older button.
+          loadOlderBtn(Math.max(0, target.position - 60));
+          el = document.querySelector('[data-msg-id="' + target.id + '"]');
+        }
+      } catch (e) { /* fall through to cursor paging below */ }
+    }
     // Older than the loaded page: page backwards until it appears.
-    // The page cap stops a degenerate loop if a page ever loads empty.
-    let pages = 0;
-    while (!el && $("loadolderbtn") && pages++ < 100) {
+    // No page cap: the loop ends when the button runs out (thread
+    // exhausted) or a page fails to load, and the no-progress guard
+    // breaks a degenerate loop where a page loads but the oldest
+    // on-screen id never moves.
+    while (!el && $("loadolderbtn")) {
+      const oldestBefore = chat.querySelector("[data-msg-id]");
+      const cursorBefore = oldestBefore ? oldestBefore.dataset.msgId : null;
       if (!await loadOlderMessages()) break;
       el = document.querySelector('[data-msg-id="' + target.id + '"]');
+      const oldestAfter = chat.querySelector("[data-msg-id]");
+      if (!el && oldestAfter && oldestAfter.dataset.msgId === cursorBefore) break;
     }
     // Live-turn message with no id on screen yet: one reopen gives
     // every message an id, then page back again if it is older.
@@ -1399,10 +1451,13 @@ async function jumpToMsgSearchMatch(idx) {
     if (!el) {
       await openThread(threadId);
       el = document.querySelector('[data-msg-id="' + target.id + '"]');
-      pages = 0;
-      while (!el && $("loadolderbtn") && pages++ < 100) {
+      while (!el && $("loadolderbtn")) {
+        const oldestBefore = chat.querySelector("[data-msg-id]");
+        const cursorBefore = oldestBefore ? oldestBefore.dataset.msgId : null;
         if (!await loadOlderMessages()) break;
         el = document.querySelector('[data-msg-id="' + target.id + '"]');
+        const oldestAfter = chat.querySelector("[data-msg-id]");
+        if (!el && oldestAfter && oldestAfter.dataset.msgId === cursorBefore) break;
       }
     }
     if (!el) {
@@ -1426,6 +1481,7 @@ async function runMsgSearch() {
     const d = await r.json();
     msgSearchMatches = d.matches || [];
     msgSearchTotal = d.total || 0;
+    msgSearchThreadTotal = d.thread_total || 0;
     if (!msgSearchMatches.length) {
       $("msgsearchcount").textContent = "No matches";
       return;

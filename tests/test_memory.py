@@ -527,6 +527,28 @@ def test_history_with_ids_before_id_walks_to_first_message(memdb):
         tid, limit=2, before_id=older[0]["id"]) == []
 
 
+def test_message_position_counts_from_oldest(memdb):
+    tid, ids = _prune_thread(memdb)
+    assert memdb.message_position(tid, ids[0]) == {"position": 1, "total": 4}
+    assert memdb.message_position(tid, ids[2]) == {"position": 3, "total": 4}
+    assert memdb.message_position(tid, ids[3]) == {"position": 4, "total": 4}
+    # Unknown id, foreign id, and unknown thread all resolve to None:
+    # a position must never be guessed for a row that is not in this
+    # thread, or a jump would land on the wrong turn.
+    assert memdb.message_position(tid, 999999) is None
+    other = memdb.create_thread("other")
+    assert memdb.message_position(other, ids[0]) is None
+    assert memdb.message_position("nope-not-real", ids[0]) is None
+
+
+def test_message_position_shifts_after_delete(memdb):
+    tid, ids = _prune_thread(memdb)
+    memdb.delete_message(tid, ids[1])
+    assert memdb.message_position(tid, ids[0]) == {"position": 1, "total": 3}
+    assert memdb.message_position(tid, ids[2]) == {"position": 2, "total": 3}
+    assert memdb.message_position(tid, ids[1]) is None
+
+
 def test_history_with_ids_before_id_wins_over_offset(memdb):
     tid, ids = _prune_thread(memdb)
     # offset=0 alone would return the newest page; the cursor must win.

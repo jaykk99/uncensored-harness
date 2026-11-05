@@ -511,6 +511,38 @@ def test_thread_message_search_limit_clamped(monkeypatch, tmp_path):
     assert len(body["matches"]) == 3  # clamped to 50, not 999
 
 
+def test_thread_message_position_endpoint(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(3):
+        memory.add_message(tid, "user", f"extra-{i}")
+    ids = [m["id"] for m in c.get(
+        f"/api/threads/{tid}?access_code={CODE}").json()["messages"]]
+    # _thread_client seeds 2 messages, then 3 extras: positions 1-5.
+    r = c.get(f"/api/threads/{tid}/messages/{ids[0]}/position?access_code={CODE}")
+    assert r.status_code == 200
+    assert r.json() == {"thread_id": tid, "message_id": ids[0],
+                        "position": 1, "total": 5}
+    r = c.get(f"/api/threads/{tid}/messages/{ids[-1]}/position?access_code={CODE}")
+    assert r.json()["position"] == 5
+    # Auth first, then thread, then the row's membership in this
+    # thread: none of them may leak the others.
+    r = c.get(f"/api/threads/{tid}/messages/{ids[0]}/position")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/{tid}/messages/{ids[0]}/position?access_code=wrong")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/nope-not-real/messages/{ids[0]}/position?access_code={CODE}")
+    assert r.status_code == 404
+    r = c.get(f"/api/threads/{tid}/messages/999999/position?access_code={CODE}")
+    assert r.status_code == 404
+    other = memory.create_thread("other")
+    memory.add_message(other, "user", "elsewhere")
+    foreign = c.get(
+        f"/api/threads/{other}?access_code={CODE}").json()["messages"][0]["id"]
+    r = c.get(f"/api/threads/{tid}/messages/{foreign}/position?access_code={CODE}")
+    assert r.status_code == 404
+
+
 def test_thread_export_markdown_download(monkeypatch, tmp_path):
     c, tid = _thread_client(monkeypatch, tmp_path)
     r = c.get(f"/api/threads/{tid}/export?access_code={CODE}")

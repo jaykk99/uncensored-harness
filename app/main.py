@@ -263,6 +263,27 @@ def thread_message_search(thread_id: str, q: str = "",
     return {"thread_id": thread_id, "query": (q or "").strip(), **result}
 
 
+@app.get("/api/threads/{thread_id}/messages/{message_id}/position")
+def thread_message_position(thread_id: str, message_id: int,
+                            access_code: str = ""):
+    """Where one message sits in its thread (oldest = 1), plus total.
+
+    The search endpoint already reports a match's position, but a
+    caller that only has a row id — a jump after a delete, a
+    deep-link to one turn — had no way to place it without paging.
+    Auth, then thread existence, then the row's membership in this
+    thread, in that order, same as the other thread endpoints, so a
+    wrong code or a foreign id cannot probe anything.
+    """
+    _check_access(access_code)
+    if memory.get_thread(thread_id) is None:
+        raise HTTPException(status_code=404, detail="no such thread")
+    pos = memory.message_position(thread_id, message_id)
+    if pos is None:
+        raise HTTPException(status_code=404, detail="no such message")
+    return {"thread_id": thread_id, "message_id": message_id, **pos}
+
+
 def _thread_markdown(thread: dict, messages: list[dict]) -> str:
     """A thread as a readable Markdown transcript, oldest-first.
 

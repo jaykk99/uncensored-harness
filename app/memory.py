@@ -416,6 +416,69 @@ def search_thread_messages(tid: str, query: str,
             "thread_total": thread_total}
 
 
+def search_all_messages(query: str, limit: int = 50) -> dict:
+    """Search every thread's messages at once, newest match first.
+
+    The sidebar /api/threads/search finds *threads* (one snippet per
+    thread, and clicking one opens the thread at its newest 60), and
+    search_thread_messages finds a turn only inside the thread already
+    open. Neither can answer "where did I say X, in any chat": a match
+    in an old thread meant guessing which thread it was in, opening
+    it, and paging back by hand. A hit here carries everything the UI
+    needs to land on the exact turn in one click — thread id and
+    title, the message's row id, its role, its 1-based position in
+    its thread plus the thread total (the same address the in-thread
+    jump machinery uses), and a snippet around the match, same
+    windowing as search_thread_messages. LIKE wildcards are escaped,
+    so a literal "%" does not match everything. `total` counts every
+    matching message even when `limit` caps the returned list.
+    Archived threads are included, flagged on the hit: like the
+    thread search, nothing is ever stranded in the archive. Results
+    come newest-first — a global search is usually hunting a recent
+    turn, and the in-thread search (oldest-first, for prev/next
+    walking) takes over once the thread is open.
+    """
+    q = (query or "").strip()
+    if not q:
+        return {"matches": [], "total": 0}
+    esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pat = f"%{esc}%"
+    limit = max(1, min(limit, 50))
+    c = _conn()
+    total = c.execute(
+        "SELECT COUNT(*) FROM messages m JOIN threads t ON t.id = m.thread_id "
+        "WHERE m.content LIKE ? ESCAPE '\\'",
+        (pat,)).fetchone()[0]
+    rows = c.execute(
+        """SELECT m.id, m.thread_id, t.title, m.role, m.content,
+                  m.created, t.archived,
+                  (SELECT COUNT(*) FROM messages m2
+                    WHERE m2.thread_id = m.thread_id AND m2.id < m.id) + 1,
+                  (SELECT COUNT(*) FROM messages m3
+                    WHERE m3.thread_id = m.thread_id)
+             FROM messages m JOIN threads t ON t.id = m.thread_id
+            WHERE m.content LIKE ? ESCAPE '\\'
+            ORDER BY m.created DESC, m.id DESC LIMIT ?""",
+        (pat, limit)).fetchall()
+    c.close()
+    matches = []
+    for (mid, tid, title, role, content, created, archived,
+         position, thread_total) in rows:
+        idx = content.lower().find(q.lower())
+        if idx < 0:
+            snippet = (content or "")[:120]
+        else:
+            start = max(0, idx - 40)
+            snippet = content[start:idx + len(q) + 80].replace("\n", " ")
+            snippet = ("..." if start > 0 else "") + snippet
+        matches.append({"id": mid, "thread_id": tid,
+                        "thread_title": title, "role": role,
+                        "position": position, "thread_total": thread_total,
+                        "archived": bool(archived), "created": created,
+                        "snippet": snippet})
+    return {"matches": matches, "total": int(total)}
+
+
 def search_threads(query: str, limit: int = 20) -> list[dict]:
     """Find threads by title or message content.
 

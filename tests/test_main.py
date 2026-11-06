@@ -511,6 +511,51 @@ def test_thread_message_search_limit_clamped(monkeypatch, tmp_path):
     assert len(body["matches"]) == 3  # clamped to 50, not 999
 
 
+def test_global_message_search_requires_code(monkeypatch, tmp_path):
+    c, _tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get("/api/messages/search?q=first")
+    assert r.status_code == 401
+    r = c.get("/api/messages/search?q=first&access_code=wrong")
+    assert r.status_code == 401
+
+
+def test_global_message_search_finds_turns_across_threads(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    other = memory.create_thread("other chat")
+    memory.add_message(other, "user", "needle elsewhere")
+    memory.add_message(tid, "assistant", "a needle answer here")
+    r = c.get(f"/api/messages/search?q=needle&access_code={CODE}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 2
+    # Newest match first: the answer just added, then the other thread.
+    assert [m["thread_id"] for m in body["matches"]] == [tid, other]
+    # The hit carries the address the UI jumps with: row id, thread
+    # position, thread total, thread title, and role.
+    hit = body["matches"][0]
+    assert hit["position"] == 3 and hit["thread_total"] == 3
+    assert hit["thread_title"] == "reopen me" and hit["role"] == "assistant"
+    assert "needle" in hit["snippet"].lower()
+    r = c.get(f"/api/messages/search?q=zzz-no-match&access_code={CODE}")
+    assert r.json()["matches"] == [] and r.json()["total"] == 0
+    r = c.get(f"/api/messages/search?access_code={CODE}")
+    assert r.json()["matches"] == []
+
+
+def test_global_message_search_limit_clamped(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(3):
+        memory.add_message(tid, "user", f"commonword {i}")
+    body = c.get(
+        f"/api/messages/search?q=commonword&limit=2&access_code={CODE}").json()
+    assert body["total"] == 3 and len(body["matches"]) == 2
+    body = c.get(
+        f"/api/messages/search?q=commonword&limit=999&access_code={CODE}").json()
+    assert len(body["matches"]) == 3  # clamped to 50, not 999
+
+
 def test_thread_message_position_endpoint(monkeypatch, tmp_path):
     from app import memory
     c, tid = _thread_client(monkeypatch, tmp_path)

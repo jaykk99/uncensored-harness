@@ -13,6 +13,7 @@ Endpoints:
   DELETE /api/threads/{id}/messages/{mid} — delete one message
   POST /api/threads/{id}/messages/{mid}/truncate — delete a message and everything after it
   GET  /api/threads/{id}/messages/search — search within one thread's messages
+  GET  /api/messages/search — search every thread's messages, jump to the turn
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
@@ -241,6 +242,26 @@ def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
                                                     offset=offset,
                                                     before_id=before_id),
             "total": memory.count_messages(thread_id)}
+
+
+@app.get("/api/messages/search")
+def global_message_search(q: str = "", access_code: str = "",
+                          limit: int = 50):
+    """Search every thread's messages at once, newest match first.
+
+    The sidebar thread search returns one snippet per matching thread
+    and opens it at the newest 60; the in-thread search only works
+    inside the thread already open. This returns per-message hits
+    across all threads, each carrying its thread id/title, row id,
+    role, 1-based position in its thread and the thread total — the
+    address the UI's jump machinery needs to land on the exact turn.
+    `limit` clamps like the other paged endpoints; `total` still
+    reports every match.
+    """
+    _check_access(access_code)
+    limit = max(1, min(limit, 50))
+    result = memory.search_all_messages(q, limit=limit)
+    return {"query": (q or "").strip(), **result}
 
 
 @app.get("/api/threads/{thread_id}/messages/search")

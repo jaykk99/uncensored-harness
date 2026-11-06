@@ -132,6 +132,11 @@
   /* A pinned thread's star stays visible without hovering, so pinned
      chats are recognizable at a glance in the sidebar. */
   .thread .tbtn.on { display: inline; color: var(--accent); }
+  /* Global message search: hits from every thread list under the
+     thread results with a section header, so a turn is findable
+     without guessing which thread holds it. */
+  .searchsect { font-size: 11px; color: var(--dim); padding: 10px 12px 4px;
+    text-transform: uppercase; letter-spacing: .07em; }
   #sidefoot { padding: 12px; border-top: 1px solid var(--border); font-size: 12px; color: var(--dim);
     display: flex; flex-direction: column; gap: 8px; }
   #routeinfo { font-size: 12px; }
@@ -1661,7 +1666,60 @@ function renderThreads(list) {
       box.appendChild(el);
     });
 }
-/* Sidebar thread search: debounced, falls back to the full list on empty. */
+/* Global message search: a hit in another thread opens that thread
+   and lands on the exact turn. The in-thread find bar takes the same
+   query, so prev/next walks the whole thread's matches from there;
+   a hit outside the in-thread search's 50-match cap (or a thread
+   that changed since the global search ran) falls back to a direct
+   position jump with a one-match set instead of failing silently. */
+async function jumpToMessage(hit, query) {
+  if (hit.thread_id !== threadId) await openThread(hit.thread_id);
+  if (threadId !== hit.thread_id) return;
+  $("msgsearchinput").value = query;
+  await runMsgSearch();
+  const idx = msgSearchMatches.findIndex(m => m.id === hit.id);
+  if (idx >= 0) { await jumpToMsgSearchMatch(idx); return; }
+  msgSearchMatches = [{ id: hit.id, position: hit.position }];
+  msgSearchTotal = 1;
+  msgSearchThreadTotal = hit.thread_total;
+  msgSearchIdx = -1;
+  await jumpToMsgSearchMatch(0);
+}
+/* Message hits from the global search, rendered under the thread
+   results: one row per matching turn (thread title + role + snippet),
+   so the sidebar shows *where* the match is, not just which thread
+   matched. Clicking one jumps straight to that turn. */
+function renderMessageHits(hits, query) {
+  const box = $("threads");
+  if (!hits.length) return;
+  const head = document.createElement("div");
+  head.className = "searchsect";
+  head.textContent = "Messages - " + hits.length +
+    (hits.length === 1 ? " match" : " matches");
+  box.appendChild(head);
+  hits.forEach(h => {
+    const el = document.createElement("div");
+    el.className = "thread";
+    const col = document.createElement("div");
+    col.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;";
+    const title = document.createElement("span");
+    title.className = "ttitle";
+    title.textContent = (h.thread_title || "untitled") +
+      (h.archived ? " (archived)" : "");
+    col.appendChild(title);
+    const sn = document.createElement("span");
+    sn.className = "tsnip";
+    sn.textContent = (h.role === "user" ? "You: " : "Assistant: ") +
+      (h.snippet || "");
+    col.appendChild(sn);
+    el.appendChild(col);
+    el.onclick = () => jumpToMessage(h, query);
+    box.appendChild(el);
+  });
+}
+/* Sidebar search: thread results on top (title/content, one snippet
+   per thread), message hits underneath (one row per matching turn
+   across all threads). Debounced, falls back to the full list on empty. */
 let threadSearchTimer = null;
 $("threadsearch").addEventListener("input", e => {
   const q = e.target.value.trim();
@@ -1669,10 +1727,14 @@ $("threadsearch").addEventListener("input", e => {
   if (!q) { loadThreads(); return; }
   threadSearchTimer = setTimeout(async () => {
     try {
-      const r = await fetch("/api/threads/search?q=" + encodeURIComponent(q) +
-        "&access_code=" + encodeURIComponent(AC));
-      const d = await r.json();
-      renderThreads(d.threads || []);
+      const [tr, mr] = await Promise.all([
+        fetch("/api/threads/search?q=" + encodeURIComponent(q) +
+          "&access_code=" + encodeURIComponent(AC)).then(r => r.json()),
+        fetch("/api/messages/search?q=" + encodeURIComponent(q) +
+          "&access_code=" + encodeURIComponent(AC)).then(r => r.json()),
+      ]);
+      renderThreads(tr.threads || []);
+      renderMessageHits(mr.matches || [], q);
     } catch (err) { /* offline */ }
   }, 250);
 });

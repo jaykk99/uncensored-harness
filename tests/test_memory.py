@@ -385,6 +385,66 @@ def test_search_thread_messages_snippet_windows_around_match(memdb):
     assert len(hit["snippet"]) < 200  # windowed, not the whole message
 
 
+def test_search_all_messages_returns_per_message_hits_newest_first(memdb):
+    a = memdb.create_thread("first chat")
+    memdb.add_message(a, "user", "deploy the widget")
+    memdb.add_message(a, "assistant", "widget deployed")
+    memdb.add_message(a, "user", "widget broke again")
+    b = memdb.create_thread("second chat")
+    memdb.add_message(b, "assistant", "the widget needs a rebuild")
+    res = memdb.search_all_messages("widget")
+    assert res["total"] == 4
+    # Newest match first: the rebuild answer, then the broke note,
+    # then the deployed reply, then the first question.
+    assert [(m["thread_id"], m["position"], m["role"])
+            for m in res["matches"]] == [
+        (b, 1, "assistant"), (a, 3, "user"),
+        (a, 2, "assistant"), (a, 1, "user")]
+    assert [m["thread_total"] for m in res["matches"]] == [1, 3, 3, 3]
+    assert res["matches"][0]["thread_title"] == "second chat"
+    assert all("widget" in m["snippet"].lower() for m in res["matches"])
+    assert all("id" in m for m in res["matches"])
+
+
+def test_search_all_messages_empty_wildcards_and_limit(memdb):
+    tid = memdb.create_thread("t")
+    for i in range(5):
+        memdb.add_message(tid, "user", f"commonword {i}")
+    memdb.add_message(tid, "user", "100% sure")
+    assert memdb.search_all_messages("")["matches"] == []
+    assert memdb.search_all_messages("   ")["total"] == 0
+    assert memdb.search_all_messages("zzz-no-match")["total"] == 0
+    # A literal "%" matches only the message that contains one.
+    pct = memdb.search_all_messages("%")
+    assert pct["total"] == 1 and "%" in pct["matches"][0]["snippet"]
+    assert memdb.search_all_messages("_")["total"] == 0
+    # total counts every match even when limit caps the returned list.
+    capped = memdb.search_all_messages("commonword", limit=2)
+    assert capped["total"] == 5 and len(capped["matches"]) == 2
+
+
+def test_search_all_messages_includes_archived_with_flag(memdb):
+    tid = memdb.create_thread("old chat")
+    memdb.add_message(tid, "user", "archive me needle")
+    memdb.set_thread_archived(tid, True)
+    other = memdb.create_thread("live chat")
+    memdb.add_message(other, "user", "live needle here")
+    hits = memdb.search_all_messages("needle")["matches"]
+    assert len(hits) == 2
+    by_thread = {h["thread_id"]: h for h in hits}
+    assert by_thread[tid]["archived"] is True
+    assert by_thread[other]["archived"] is False
+
+
+def test_search_all_messages_snippet_windows_around_match(memdb):
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "x" * 100 + "needle" + "y" * 100)
+    hit = memdb.search_all_messages("needle")["matches"][0]
+    assert hit["snippet"].startswith("...")
+    assert "needle" in hit["snippet"]
+    assert len(hit["snippet"]) < 200  # windowed, not the whole message
+
+
 def test_get_all_messages_returns_everything_in_order(memdb):
     tid = memdb.create_thread("t")
     for i in range(5):

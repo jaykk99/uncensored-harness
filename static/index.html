@@ -200,6 +200,14 @@
   #msgsearch button:hover { border-color: var(--accent); }
   .msg.search-hit .bubble { outline: 1px dashed var(--dim); outline-offset: 3px; }
   .msg.search-current .bubble { outline: 2px solid var(--accent); outline-offset: 3px; }
+  /* Word-level match highlight: the outline alone marks the bubble,
+     but in a long turn the matched words were still hard to spot.
+     Every on-screen match gets its words marked in amber; the
+     current match gets a solid mark so prev/next jumps land on the
+     exact words, not just the right bubble. */
+  .msg mark.search-mark { background: rgba(217,164,65,.45); color: inherit;
+    border-radius: 3px; padding: 0 1px; }
+  .msg.search-current mark.search-mark { background: var(--amber); color: #141418; }
   .attachimg { max-width: 280px; border-radius: 10px; border: 1px solid var(--border);
     margin-bottom: 8px; display: block; }
   .bubble h1, .bubble h2, .bubble h3 { margin: 14px 0 6px; line-height: 1.3; }
@@ -1348,6 +1356,12 @@ async function openThread(id) {
     threadId = d.thread.id;
     $("msgsearch").classList.add("visible");
     renderThreadMessages(d.messages);
+    // Reopening the same thread (e.g. after a delete) re-renders the
+    // transcript, which wipes the outlines and word marks; re-apply
+    // them when a search is active so the find state survives the
+    // reopen. A different thread cleared the search above, so this
+    // is a no-op there.
+    if (msgSearchMatches.length) applyMsgSearchHighlights();
     $("welcome").style.display = "none";
     loadOlderBtn(d.total - (d.messages || []).length);
     chat.scrollTop = chat.scrollHeight;
@@ -1376,8 +1390,69 @@ async function openThread(id) {
 let msgSearchMatches = [], msgSearchIdx = -1, msgSearchThreadId = "";
 let msgSearchTotal = 0, msgSearchThreadTotal = 0;
 let msgSearchTimer = null, msgSearchBusy = false;
+/* Word-level highlighting inside a message bubble: wrap every
+   case-insensitive occurrence of the query in <mark>. The bubbles
+   hold rendered markdown, so this walks text nodes instead of doing
+   string surgery on innerHTML, which would corrupt tags and
+   attributes. The query is matched literally (indexOf, not a
+   RegExp), so "100%", "c++" or "a.b" highlight exactly what was
+   typed. UI chrome inside a bubble is skipped: the hover delete /
+   truncate buttons, the thinking log, tool-call blocks, the "web
+   search" badge, code-block headers (language label + copy/run
+   buttons), and buttons generally (e.g. the "Open live preview"
+   button addPreviewButtons appends to a paragraph). Code itself is
+   highlighted: the search matches code content too, so a hit in a
+   code block should be visible there as well. Returns the number
+   of marks added. */
+function highlightSearchTerms(root, query) {
+  const q = (query || "").trim().toLowerCase();
+  if (!root || !q) return 0;
+  let count = 0;
+  const skipClasses = ["msgtools", "thinking", "thinklog", "toolcall",
+    "webbadge", "chead"];
+  function markText(node) {
+    let rest = node, n = 0;
+    for (;;) {
+      const idx = rest.nodeValue.toLowerCase().indexOf(q);
+      if (idx < 0) break;
+      const after = rest.splitText(idx);
+      const tail = after.splitText(q.length);
+      const mark = document.createElement("mark");
+      mark.className = "search-mark";
+      after.parentNode.replaceChild(mark, after);
+      mark.appendChild(after);
+      n++;
+      rest = tail;
+      if (!rest.nodeValue) break;
+    }
+    return n;
+  }
+  function walk(node) {
+    if (node.nodeType === 3) { count += markText(node); return; }
+    if (node.nodeType !== 1) return;
+    const tag = node.tagName;
+    if (tag === "SCRIPT" || tag === "STYLE" || tag === "TEXTAREA" ||
+        tag === "BUTTON" || tag === "MARK") return;
+    if (node.classList && skipClasses.some(c => node.classList.contains(c))) return;
+    Array.from(node.childNodes).forEach(walk);
+  }
+  walk(root);
+  return count;
+}
+/* Unwrap every search mark under root and merge the text back, so a
+   new query or a cleared search never leaves stale marks behind. */
+function clearSearchMarks(root) {
+  (root || document).querySelectorAll("mark.search-mark").forEach(m => {
+    const p = m.parentNode;
+    if (!p) return;
+    while (m.firstChild) p.insertBefore(m.firstChild, m);
+    p.removeChild(m);
+    p.normalize();
+  });
+}
 function clearMsgSearch() {
   msgSearchMatches = []; msgSearchIdx = -1;
+  clearSearchMarks(chat);
   document.querySelectorAll(".msg.search-hit, .msg.search-current")
     .forEach(e => e.classList.remove("search-hit", "search-current"));
   $("msgsearchcount").textContent = "";
@@ -1392,11 +1467,19 @@ function msgSearchCountText() {
 function applyMsgSearchHighlights() {
   document.querySelectorAll(".msg.search-hit, .msg.search-current")
     .forEach(e => e.classList.remove("search-hit", "search-current"));
+  clearSearchMarks(chat);
+  const q = $("msgsearchinput").value.trim();
   msgSearchMatches.forEach((m, i) => {
     const el = document.querySelector('[data-msg-id="' + m.id + '"]');
     if (!el) return;
     el.classList.add("search-hit");
     if (i === msgSearchIdx) el.classList.add("search-current");
+    // Word-level marks, not just the bubble outline: re-marking on
+    // every apply keeps the marks honest after a re-render (a jump
+    // reloads the transcript, and openThread does too), and the
+    // clear above keeps a changed query from leaving stale marks.
+    const bubble = el.querySelector(".bubble");
+    if (bubble) highlightSearchTerms(bubble, q);
   });
   $("msgsearchcount").textContent = msgSearchCountText();
 }

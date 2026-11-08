@@ -556,6 +556,49 @@ def test_global_message_search_limit_clamped(monkeypatch, tmp_path):
     assert len(body["matches"]) == 3  # clamped to 50, not 999
 
 
+def test_thread_message_search_pages_with_after_id(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(3):
+        memory.add_message(tid, "user", f"commonword {i}")
+    p1 = c.get(
+        f"/api/threads/{tid}/messages/search?q=commonword&limit=2&access_code={CODE}").json()
+    assert p1["total"] == 3 and len(p1["matches"]) == 2
+    assert p1["has_more"] is True and p1["next_after_id"]
+    p2 = c.get(
+        f"/api/threads/{tid}/messages/search?q=commonword&limit=2"
+        f"&after_id={p1['next_after_id']}&access_code={CODE}").json()
+    assert len(p2["matches"]) == 1 and p2["has_more"] is False
+    assert p2["next_after_id"] is None
+    assert p1["matches"][0]["id"] != p2["matches"][0]["id"]
+
+
+def test_global_message_search_pages_with_before_id(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    other = memory.create_thread("other chat")
+    for i in range(2):
+        memory.add_message(other, "user", f"commonword {i}")
+    for i in range(2):
+        memory.add_message(tid, "user", f"commonword {i}")
+    p1 = c.get(
+        f"/api/messages/search?q=commonword&limit=2&access_code={CODE}").json()
+    assert p1["total"] == 4 and len(p1["matches"]) == 2
+    assert p1["has_more"] is True and p1["next_before_id"]
+    p2 = c.get(
+        f"/api/messages/search?q=commonword&limit=2"
+        f"&before_id={p1['next_before_id']}&access_code={CODE}").json()
+    assert len(p2["matches"]) == 2 and p2["has_more"] is False
+    assert p2["next_before_id"] is None
+    seen = [m["id"] for m in p1["matches"] + p2["matches"]]
+    assert len(seen) == len(set(seen)) == 4
+    # The cursor is still behind the access-code gate.
+    r = c.get(
+        f"/api/messages/search?q=commonword&limit=2"
+        f"&before_id={p1['next_before_id']}")
+    assert r.status_code == 401
+
+
 def test_thread_message_position_endpoint(monkeypatch, tmp_path):
     from app import memory
     c, tid = _thread_client(monkeypatch, tmp_path)

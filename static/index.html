@@ -499,6 +499,7 @@
         <span id="msgsearchcount"></span>
         <button id="msgsearchprev" title="Previous match">&#8593;</button>
         <button id="msgsearchnext" title="Next match">&#8595;</button>
+        <button id="msgsearchmore" title="Load more matches" style="display:none">&#8230;</button>
         <button id="msgsearchclear" title="Clear search">&#215;</button>
       </div>
       <div id="chat">
@@ -1389,6 +1390,11 @@ async function openThread(id) {
    finishes and is stored). */
 let msgSearchMatches = [], msgSearchIdx = -1, msgSearchThreadId = "";
 let msgSearchTotal = 0, msgSearchThreadTotal = 0;
+/* Paging state for the in-thread find: the search endpoint caps a
+   page at 50 matches while `total` counts every match, so a long
+   thread's later matches were unreachable. hasMore/afterId carry the
+   next page; the "…" button in the find bar loads it. */
+let msgSearchHasMore = false, msgSearchAfterId = null;
 let msgSearchTimer = null, msgSearchBusy = false;
 /* Word-level highlighting inside a message bubble: wrap every
    case-insensitive occurrence of the query in <mark>. The bubbles
@@ -1452,6 +1458,8 @@ function clearSearchMarks(root) {
 }
 function clearMsgSearch() {
   msgSearchMatches = []; msgSearchIdx = -1;
+  msgSearchHasMore = false; msgSearchAfterId = null;
+  $("msgsearchmore").style.display = "none";
   clearSearchMarks(chat);
   document.querySelectorAll(".msg.search-hit, .msg.search-current")
     .forEach(e => e.classList.remove("search-hit", "search-current"));
@@ -1570,6 +1578,9 @@ async function runMsgSearch() {
     msgSearchMatches = d.matches || [];
     msgSearchTotal = d.total || 0;
     msgSearchThreadTotal = d.thread_total || 0;
+    msgSearchHasMore = !!d.has_more;
+    msgSearchAfterId = d.next_after_id || null;
+    $("msgsearchmore").style.display = msgSearchHasMore ? "" : "none";
     if (!msgSearchMatches.length) {
       $("msgsearchcount").textContent = "No matches";
       return;
@@ -1577,6 +1588,35 @@ async function runMsgSearch() {
     await jumpToMsgSearchMatch(0);
   } catch (e) { toast("Could not search this chat.", true); }
 }
+/* Next page of in-thread matches, oldest-first, appended after the
+   ones already loaded so prev/next keeps walking in order and the
+   current index never moves. The count text drops its "+" once the
+   last page lands. */
+async function loadMoreMsgSearchMatches() {
+  const q = $("msgsearchinput").value.trim();
+  if (!q || !threadId || !msgSearchHasMore || !msgSearchAfterId) return;
+  const btn = $("msgsearchmore");
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/threads/" + encodeURIComponent(threadId) +
+      "/messages/search?q=" + encodeURIComponent(q) +
+      "&after_id=" + encodeURIComponent(msgSearchAfterId) +
+      "&access_code=" + encodeURIComponent(AC));
+    if (!r.ok) throw new Error("search failed");
+    const d = await r.json();
+    (d.matches || []).forEach(m => {
+      if (!msgSearchMatches.some(x => x.id === m.id))
+        msgSearchMatches.push(m);
+    });
+    msgSearchTotal = d.total || msgSearchTotal;
+    msgSearchHasMore = !!d.has_more;
+    msgSearchAfterId = d.next_after_id || null;
+    btn.style.display = msgSearchHasMore ? "" : "none";
+    applyMsgSearchHighlights();
+  } catch (e) { toast("Could not load more matches.", true); }
+  finally { btn.disabled = false; }
+}
+$("msgsearchmore").onclick = loadMoreMsgSearchMatches;
 $("msgsearchinput").addEventListener("input", () => {
   clearTimeout(msgSearchTimer);
   msgSearchTimer = setTimeout(runMsgSearch, 250);
@@ -1611,6 +1651,7 @@ $("archivedtoggle").onclick = () => {
   showingArchived = !showingArchived;
   $("archivedtoggle").textContent = showingArchived ? "Show chats" : "Show archived";
   $("threadsearch").value = "";
+  resetMsgHits();
   loadThreads();
 };
 /* Import: the round-trip for export. An exported .json restores as a
@@ -1764,41 +1805,97 @@ async function jumpToMessage(hit, query) {
   if (idx >= 0) { await jumpToMsgSearchMatch(idx); return; }
   msgSearchMatches = [{ id: hit.id, position: hit.position }];
   msgSearchTotal = 1;
+  msgSearchHasMore = false; msgSearchAfterId = null;
+  $("msgsearchmore").style.display = "none";
   msgSearchThreadTotal = hit.thread_total;
   msgSearchIdx = -1;
   await jumpToMsgSearchMatch(0);
+}
+/* Sidebar global search paging: the endpoint caps a page at 50 hits
+   while `total` counts every match, so turns older than the newest
+   50 were unreachable. The state carries the query and cursor
+   across "show more" clicks; a new search resets it. */
+let msgHitsQuery = "", msgHitsBeforeId = null, msgHitsHasMore = false;
+let msgHitsTotal = 0, msgHitsLoaded = 0;
+function resetMsgHits() {
+  msgHitsQuery = ""; msgHitsBeforeId = null; msgHitsHasMore = false;
+  msgHitsTotal = 0; msgHitsLoaded = 0;
+}
+function messageHitRow(h, query) {
+  const el = document.createElement("div");
+  el.className = "thread";
+  const col = document.createElement("div");
+  col.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;";
+  const title = document.createElement("span");
+  title.className = "ttitle";
+  title.textContent = (h.thread_title || "untitled") +
+    (h.archived ? " (archived)" : "");
+  col.appendChild(title);
+  const sn = document.createElement("span");
+  sn.className = "tsnip";
+  sn.textContent = (h.role === "user" ? "You: " : "Assistant: ") +
+    (h.snippet || "");
+  col.appendChild(sn);
+  el.appendChild(col);
+  el.onclick = () => jumpToMessage(h, query);
+  return el;
+}
+function appendMsgHitsMoreBtn(box) {
+  const old = $("msghitsmore");
+  if (old) old.remove();
+  if (!msgHitsHasMore) return;
+  const btn = document.createElement("button");
+  btn.className = "tbtn";
+  btn.id = "msghitsmore";
+  btn.style.cssText = "width:100%;margin:6px 0;padding:8px;";
+  btn.textContent = "Show more message results (" +
+    (msgHitsTotal - msgHitsLoaded) + " more)";
+  btn.onclick = loadMoreMessageHits;
+  box.appendChild(btn);
+}
+/* Next page of global message hits, appended after the ones already
+   shown (the button is re-created last, so the rows always land
+   above it). A page that lands after the user typed a new query is
+   dropped, not appended under the new results. */
+async function loadMoreMessageHits() {
+  const q = msgHitsQuery;
+  if (!q || !msgHitsHasMore || !msgHitsBeforeId) return;
+  const btn = $("msghitsmore");
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/messages/search?q=" + encodeURIComponent(q) +
+      "&before_id=" + encodeURIComponent(msgHitsBeforeId) +
+      "&access_code=" + encodeURIComponent(AC));
+    if (!r.ok) throw new Error("search failed");
+    const d = await r.json();
+    if (q !== msgHitsQuery) return;
+    const box = $("threads");
+    (d.matches || []).forEach(h => box.appendChild(messageHitRow(h, q)));
+    msgHitsLoaded += (d.matches || []).length;
+    msgHitsTotal = d.total || msgHitsTotal;
+    msgHitsHasMore = !!d.has_more;
+    msgHitsBeforeId = d.next_before_id || null;
+    appendMsgHitsMoreBtn(box);
+  } catch (e) { toast("Could not load more results.", true); }
+  finally { if (btn) btn.disabled = false; }
 }
 /* Message hits from the global search, rendered under the thread
    results: one row per matching turn (thread title + role + snippet),
    so the sidebar shows *where* the match is, not just which thread
    matched. Clicking one jumps straight to that turn. */
-function renderMessageHits(hits, query) {
+function renderMessageHits(hits, query, total, hasMore, nextBeforeId) {
   const box = $("threads");
+  msgHitsQuery = query; msgHitsTotal = total || hits.length;
+  msgHitsLoaded = hits.length; msgHitsHasMore = !!hasMore;
+  msgHitsBeforeId = nextBeforeId || null;
   if (!hits.length) return;
   const head = document.createElement("div");
   head.className = "searchsect";
-  head.textContent = "Messages - " + hits.length +
-    (hits.length === 1 ? " match" : " matches");
+  head.textContent = "Messages - " + msgHitsTotal +
+    (msgHitsTotal === 1 ? " match" : " matches");
   box.appendChild(head);
-  hits.forEach(h => {
-    const el = document.createElement("div");
-    el.className = "thread";
-    const col = document.createElement("div");
-    col.style.cssText = "flex:1;min-width:0;display:flex;flex-direction:column;";
-    const title = document.createElement("span");
-    title.className = "ttitle";
-    title.textContent = (h.thread_title || "untitled") +
-      (h.archived ? " (archived)" : "");
-    col.appendChild(title);
-    const sn = document.createElement("span");
-    sn.className = "tsnip";
-    sn.textContent = (h.role === "user" ? "You: " : "Assistant: ") +
-      (h.snippet || "");
-    col.appendChild(sn);
-    el.appendChild(col);
-    el.onclick = () => jumpToMessage(h, query);
-    box.appendChild(el);
-  });
+  hits.forEach(h => box.appendChild(messageHitRow(h, query)));
+  appendMsgHitsMoreBtn(box);
 }
 /* Sidebar search: thread results on top (title/content, one snippet
    per thread), message hits underneath (one row per matching turn
@@ -1807,7 +1904,8 @@ let threadSearchTimer = null;
 $("threadsearch").addEventListener("input", e => {
   const q = e.target.value.trim();
   clearTimeout(threadSearchTimer);
-  if (!q) { loadThreads(); return; }
+  if (!q) { resetMsgHits(); loadThreads(); return; }
+  msgHitsQuery = q;
   threadSearchTimer = setTimeout(async () => {
     try {
       const [tr, mr] = await Promise.all([
@@ -1816,8 +1914,10 @@ $("threadsearch").addEventListener("input", e => {
         fetch("/api/messages/search?q=" + encodeURIComponent(q) +
           "&access_code=" + encodeURIComponent(AC)).then(r => r.json()),
       ]);
+      if (q !== $("threadsearch").value.trim()) return;
       renderThreads(tr.threads || []);
-      renderMessageHits(mr.matches || [], q);
+      renderMessageHits(mr.matches || [], q, mr.total,
+        mr.has_more, mr.next_before_id);
     } catch (err) { /* offline */ }
   }, 250);
 });

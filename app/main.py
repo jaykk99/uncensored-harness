@@ -246,7 +246,7 @@ def thread_detail(thread_id: str, access_code: str = "", limit: int = 60,
 
 @app.get("/api/messages/search")
 def global_message_search(q: str = "", access_code: str = "",
-                          limit: int = 50):
+                          limit: int = 50, before_id: int | None = None):
     """Search every thread's messages at once, newest match first.
 
     The sidebar thread search returns one snippet per matching thread
@@ -256,17 +256,23 @@ def global_message_search(q: str = "", access_code: str = "",
     role, 1-based position in its thread and the thread total — the
     address the UI's jump machinery needs to land on the exact turn.
     `limit` clamps like the other paged endpoints; `total` still
-    reports every match.
+    reports every match. `before_id` pages backwards: only matches
+    older than that row are returned, so the sidebar's "show more"
+    button can fetch the next page with the last returned id;
+    `has_more` and `next_before_id` say whether there is one and
+    what cursor to pass.
     """
     _check_access(access_code)
     limit = max(1, min(limit, 50))
-    result = memory.search_all_messages(q, limit=limit)
+    result = memory.search_all_messages(q, limit=limit,
+                                        before_id=before_id)
     return {"query": (q or "").strip(), **result}
 
 
 @app.get("/api/threads/{thread_id}/messages/search")
 def thread_message_search(thread_id: str, q: str = "",
-                          access_code: str = "", limit: int = 50):
+                          access_code: str = "", limit: int = 50,
+                          after_id: int | None = None):
     """Search within one thread's messages, oldest-first.
 
     The sidebar /api/threads/search finds threads; this finds a turn
@@ -274,13 +280,18 @@ def thread_message_search(thread_id: str, q: str = "",
     actually needs. Auth, then thread existence, are checked in that
     order, same as the other thread endpoints, so a wrong code or an
     unknown id cannot probe anything. `limit` clamps like the other
-    paged endpoints; `total` still reports every match.
+    paged endpoints; `total` still reports every match. `after_id`
+    pages forward: only matches with a row id above it are returned,
+    so the find bar's "more matches" button can fetch the next page
+    with the last returned id; `has_more` and `next_after_id` say
+    whether there is one and what cursor to pass.
     """
     _check_access(access_code)
     if memory.get_thread(thread_id) is None:
         raise HTTPException(status_code=404, detail="no such thread")
     limit = max(1, min(limit, 50))
-    result = memory.search_thread_messages(thread_id, q, limit=limit)
+    result = memory.search_thread_messages(thread_id, q, limit=limit,
+                                           after_id=after_id)
     return {"thread_id": thread_id, "query": (q or "").strip(), **result}
 
 

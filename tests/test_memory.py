@@ -423,6 +423,79 @@ def test_search_all_messages_empty_wildcards_and_limit(memdb):
     assert capped["total"] == 5 and len(capped["matches"]) == 2
 
 
+def test_search_thread_messages_pages_with_after_id(memdb):
+    tid = memdb.create_thread("t")
+    for i in range(5):
+        memdb.add_message(tid, "user", f"commonword {i}")
+    memdb.add_message(tid, "user", "unrelated")
+    # Page 1: the two oldest matches, with a cursor for page 2.
+    p1 = memdb.search_thread_messages(tid, "commonword", limit=2)
+    assert p1["total"] == 5 and len(p1["matches"]) == 2
+    assert p1["has_more"] is True
+    assert p1["next_after_id"] == p1["matches"][-1]["id"]
+    assert [m["position"] for m in p1["matches"]] == [1, 2]
+    # Page 2: the next two, oldest-first, no repeats.
+    p2 = memdb.search_thread_messages(tid, "commonword", limit=2,
+                                      after_id=p1["next_after_id"])
+    assert p2["total"] == 5 and len(p2["matches"]) == 2
+    assert p2["has_more"] is True
+    assert [m["position"] for m in p2["matches"]] == [3, 4]
+    # Page 3: the last match; the cursor is spent.
+    p3 = memdb.search_thread_messages(tid, "commonword", limit=2,
+                                      after_id=p2["next_after_id"])
+    assert len(p3["matches"]) == 1
+    assert [m["position"] for m in p3["matches"]] == [5]
+    assert p3["has_more"] is False and p3["next_after_id"] is None
+    # Chained pages cover every match exactly once.
+    seen = [m["id"] for p in (p1, p2, p3) for m in p["matches"]]
+    assert len(seen) == len(set(seen)) == 5
+    # An empty query still reports no next page.
+    assert memdb.search_thread_messages(
+        tid, "", after_id=1)["has_more"] is False
+
+
+def test_search_all_messages_pages_with_before_id(memdb):
+    a = memdb.create_thread("first chat")
+    for i in range(3):
+        memdb.add_message(a, "user", f"commonword {i}")
+    b = memdb.create_thread("second chat")
+    for i in range(2):
+        memdb.add_message(b, "assistant", f"commonword {i}")
+    # 5 matches, newest first: the two from b, then the three from a.
+    p1 = memdb.search_all_messages("commonword", limit=2)
+    assert p1["total"] == 5 and len(p1["matches"]) == 2
+    assert p1["has_more"] is True
+    assert p1["next_before_id"] == p1["matches"][-1]["id"]
+    assert [m["thread_id"] for m in p1["matches"]] == [b, b]
+    p2 = memdb.search_all_messages("commonword", limit=2,
+                                   before_id=p1["next_before_id"])
+    assert p2["total"] == 5 and len(p2["matches"]) == 2
+    assert p2["has_more"] is True
+    assert [m["thread_id"] for m in p2["matches"]] == [a, a]
+    p3 = memdb.search_all_messages("commonword", limit=2,
+                                   before_id=p2["next_before_id"])
+    assert len(p3["matches"]) == 1 and p3["has_more"] is False
+    assert p3["next_before_id"] is None
+    # Chained pages cover every match exactly once, newest first.
+    # Every message here was stored within one second, so the
+    # (created, id) cursor did the work, not the timestamp alone.
+    seen = [m["id"] for p in (p1, p2, p3) for m in p["matches"]]
+    assert len(seen) == len(set(seen)) == 5
+    assert seen == sorted(seen, reverse=True)
+
+
+def test_search_all_messages_unknown_before_id_is_empty_page(memdb):
+    tid = memdb.create_thread("t")
+    memdb.add_message(tid, "user", "commonword here")
+    res = memdb.search_all_messages("commonword", before_id=999999)
+    assert res["matches"] == [] and res["total"] == 1
+    assert res["has_more"] is False and res["next_before_id"] is None
+    # One page that fits reports no next page either.
+    single = memdb.search_all_messages("commonword")
+    assert len(single["matches"]) == 1 and single["has_more"] is False
+    assert single["next_before_id"] is None
+
+
 def test_search_all_messages_includes_archived_with_flag(memdb):
     tid = memdb.create_thread("old chat")
     memdb.add_message(tid, "user", "archive me needle")

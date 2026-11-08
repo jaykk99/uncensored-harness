@@ -365,7 +365,8 @@ def list_archived_threads() -> list[dict]:
 
 
 def search_thread_messages(tid: str, query: str,
-                           limit: int = 50) -> dict:
+                           limit: int = 50,
+                           after_id: int | None = None) -> dict:
     """Search inside one thread's messages, oldest-first.
 
     The sidebar search finds *threads* by content, but once a long
@@ -379,19 +380,32 @@ def search_thread_messages(tid: str, query: str,
     not match everything. `total` counts every matching message even
     when `limit` caps the returned list; `thread_total` is the whole
     thread, so the UI can tell a capped result from a complete one.
+    `after_id` pages forward (oldest-first): only matches with a row
+    id above it are returned, so the find bar's "more matches" button
+    fetches the next page with the last returned id. `has_more` says
+    whether another page exists, and `next_after_id` is the cursor
+    for it (the last returned id, None when there is no next page).
+    Without a cursor the first page starts at the oldest match,
+    exactly as before.
     """
     q = (query or "").strip()
     thread_total = count_messages(tid)
     if not q:
-        return {"matches": [], "total": 0, "thread_total": thread_total}
+        return {"matches": [], "total": 0, "thread_total": thread_total,
+                "has_more": False, "next_after_id": None}
     esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pat = f"%{esc}%"
     limit = max(1, min(limit, 50))
     c = _conn()
+    total = c.execute(
+        "SELECT COUNT(*) FROM messages WHERE thread_id=? "
+        "AND content LIKE ? ESCAPE '\\'",
+        (tid, pat)).fetchone()[0]
     rows = c.execute(
         "SELECT id, role, content FROM messages WHERE thread_id=? "
-        "AND content LIKE ? ESCAPE '\\' ORDER BY id ASC",
-        (tid, pat)).fetchall()
+        "AND content LIKE ? ESCAPE '\\' "
+        "AND (? IS NULL OR id > ?) ORDER BY id ASC LIMIT ?",
+        (tid, pat, after_id, after_id, limit + 1)).fetchall()
     # Position is the message's place in the whole thread (oldest = 1),
     # not its place among the matches: the UI uses it to tell whether
     # the match is already on screen or still in an older page.
@@ -399,7 +413,7 @@ def search_thread_messages(tid: str, query: str,
         c.execute("SELECT id FROM messages WHERE thread_id=? "
                   "ORDER BY id ASC", (tid,)).fetchall(), start=1)}
     c.close()
-    total = len(rows)
+    has_more = len(rows) > limit
     matches = []
     for mid, role, content in rows[:limit]:
         pos = positions.get(mid, 0)
@@ -412,11 +426,14 @@ def search_thread_messages(tid: str, query: str,
             snippet = ("..." if start > 0 else "") + snippet
         matches.append({"id": mid, "role": role, "position": pos,
                         "snippet": snippet})
-    return {"matches": matches, "total": total,
-            "thread_total": thread_total}
+    return {"matches": matches, "total": int(total),
+            "thread_total": thread_total,
+            "has_more": has_more,
+            "next_after_id": matches[-1]["id"] if has_more else None}
 
 
-def search_all_messages(query: str, limit: int = 50) -> dict:
+def search_all_messages(query: str, limit: int = 50,
+                        before_id: int | None = None) -> dict:
     """Search every thread's messages at once, newest match first.
 
     The sidebar /api/threads/search finds *threads* (one snippet per
@@ -437,10 +454,21 @@ def search_all_messages(query: str, limit: int = 50) -> dict:
     come newest-first — a global search is usually hunting a recent
     turn, and the in-thread search (oldest-first, for prev/next
     walking) takes over once the thread is open.
+    `before_id` pages backwards (newest-first): only matches older
+    than that row are returned, so the sidebar's "show more" button
+    fetches the next page with the last returned id. The cursor
+    compares (created, id) as a pair, so two messages stored in the
+    same second still page exactly, with no repeats and no gaps.
+    `has_more` says whether another page exists, and
+    `next_before_id` is the cursor for it (the last returned id,
+    None when there is no next page). An unknown cursor id returns
+    an empty page rather than guessing. Without a cursor the first
+    page starts at the newest match, exactly as before.
     """
     q = (query or "").strip()
     if not q:
-        return {"matches": [], "total": 0}
+        return {"matches": [], "total": 0, "has_more": False,
+                "next_before_id": None}
     esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pat = f"%{esc}%"
     limit = max(1, min(limit, 50))
@@ -449,6 +477,16 @@ def search_all_messages(query: str, limit: int = 50) -> dict:
         "SELECT COUNT(*) FROM messages m JOIN threads t ON t.id = m.thread_id "
         "WHERE m.content LIKE ? ESCAPE '\\'",
         (pat,)).fetchone()[0]
+    anchor_created = anchor_id = None
+    if before_id is not None:
+        anchor = c.execute(
+            "SELECT created, id FROM messages WHERE id=?",
+            (before_id,)).fetchone()
+        if anchor is None:
+            c.close()
+            return {"matches": [], "total": int(total),
+                    "has_more": False, "next_before_id": None}
+        anchor_created, anchor_id = anchor
     rows = c.execute(
         """SELECT m.id, m.thread_id, t.title, m.role, m.content,
                   m.created, t.archived,
@@ -458,12 +496,15 @@ def search_all_messages(query: str, limit: int = 50) -> dict:
                     WHERE m3.thread_id = m.thread_id)
              FROM messages m JOIN threads t ON t.id = m.thread_id
             WHERE m.content LIKE ? ESCAPE '\\'
+              AND (? IS NULL OR (m.created, m.id) < (?, ?))
             ORDER BY m.created DESC, m.id DESC LIMIT ?""",
-        (pat, limit)).fetchall()
+        (pat, anchor_created, anchor_created, anchor_id,
+         limit + 1)).fetchall()
     c.close()
+    has_more = len(rows) > limit
     matches = []
     for (mid, tid, title, role, content, created, archived,
-         position, thread_total) in rows:
+         position, thread_total) in rows[:limit]:
         idx = content.lower().find(q.lower())
         if idx < 0:
             snippet = (content or "")[:120]
@@ -476,7 +517,9 @@ def search_all_messages(query: str, limit: int = 50) -> dict:
                         "position": position, "thread_total": thread_total,
                         "archived": bool(archived), "created": created,
                         "snippet": snippet})
-    return {"matches": matches, "total": int(total)}
+    return {"matches": matches, "total": int(total),
+            "has_more": has_more,
+            "next_before_id": matches[-1]["id"] if has_more else None}
 
 
 def search_threads(query: str, limit: int = 20) -> list[dict]:

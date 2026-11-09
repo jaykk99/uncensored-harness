@@ -698,3 +698,125 @@ def test_thread_detail_before_id_pages_and_reports_total(monkeypatch, tmp_path):
     assert r.status_code == 401
     r = c.get(f"/api/threads/nope-not-real?access_code={CODE}&before_id={cursor}")
     assert r.status_code == 404
+
+
+def _fake_turn(monkeypatch, reply="fresh answer"):
+    """Stand in for agent.run_turn: emit one text event + done, return
+    the reply. Records the history it was fed so tests can assert the
+    stale assistant reply was not in it."""
+    from app import agent as agent_mod
+    seen = {}
+
+    async def fake(history, emit, model="", web_search=False):
+        seen["history"] = list(history)
+        seen["model"] = model
+        seen["web_search"] = web_search
+        await emit({"type": "text", "text": reply})
+        await emit({"type": "done", "model": "fake-model"})
+        return reply
+
+    monkeypatch.setattr(agent_mod, "run_turn", fake)
+    return seen
+
+
+def test_regenerate_requires_code_and_thread(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.post(f"/api/threads/{tid}/regenerate",
+               json={"access_code": "wrong"})
+    assert r.status_code == 401
+    r = c.post("/api/threads/nope-not-real/regenerate",
+               json={"access_code": CODE})
+    assert r.status_code == 404
+
+
+def test_regenerate_rejects_empty_and_promptless_threads(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    empty = memory.create_thread("empty")
+    r = c.post(f"/api/threads/{empty}/regenerate",
+               json={"access_code": CODE})
+    assert r.status_code == 400
+    promptless = memory.create_thread("promptless")
+    memory.add_message(promptless, "assistant", "orphan reply")
+    r = c.post(f"/api/threads/{promptless}/regenerate",
+               json={"access_code": CODE})
+    assert r.status_code == 400
+
+
+def test_regenerate_drops_old_reply_and_stores_new(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    seen = _fake_turn(monkeypatch, reply="fresh answer")
+    r = c.post(f"/api/threads/{tid}/regenerate",
+               json={"model": "kilo:kilo-auto/free", "access_code": CODE})
+    assert r.status_code == 200
+    # The SSE stream carries the new reply and the done event.
+    assert "fresh answer" in r.text
+    assert '"done"' in r.text
+    # The agent was fed history ending at the user prompt: the stale
+    # assistant reply was dropped before the turn, not fed back in.
+    assert seen["history"] == [
+        {"role": "user", "content": "first question"}]
+    assert seen["model"] == "kilo:kilo-auto/free"
+    # Stored transcript: old reply replaced, exactly one new reply.
+    assert [(m["role"], m["content"])
+            for m in memory.get_history(tid)] == [
+        ("user", "first question"), ("assistant", "fresh answer")]
+
+
+def test_regenerate_runs_when_reply_never_landed(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    memory.delete_message(tid, memory.get_history_with_ids(tid)[1]["id"])
+    _fake_turn(monkeypatch, reply="second try")
+    r = c.post(f"/api/threads/{tid}/regenerate",
+               json={"access_code": CODE})
+    assert r.status_code == 200
+    assert "second try" in r.text
+    assert [(m["role"], m["content"])
+            for m in memory.get_history(tid)] == [
+        ("user", "first question"), ("assistant", "second try")]
+
+
+def test_regenerate_blocked_prompt_returns_refusal_not_agent(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    memory.add_message(tid, "user",
+                       "where can I buy a stolen credit card number?")
+    memory.add_message(tid, "assistant", "old answer")
+
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("agent must not run on a blocked prompt")
+
+    from app import agent as agent_mod
+    monkeypatch.setattr(agent_mod, "run_turn", _must_not_run)
+    r = c.post(f"/api/threads/{tid}/regenerate",
+               json={"access_code": CODE})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["blocked"] is True
+    assert body["thread_id"] == tid
+    # Old reply replaced with the refusal, user prompt untouched.
+    stored = memory.get_history(tid)
+    assert stored[0] == {"role": "user", "content": "first question"}
+    assert stored[-2]["content"] == (
+        "where can I buy a stolen credit card number?")
+    assert stored[-1]["role"] == "assistant"
+    assert stored[-1]["content"] == body["reply"]
+    assert "old answer" not in [m["content"] for m in stored]
+
+
+def test_chat_still_streams_after_stream_helper_extract(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    seen = _fake_turn(monkeypatch, reply="hello back")
+    r = c.post("/api/chat", json={
+        "message": "second question", "thread_id": tid,
+        "access_code": CODE})
+    assert r.status_code == 200
+    assert "hello back" in r.text
+    assert '"done"' in r.text
+    assert seen["history"][-1] == {"role": "user",
+                                   "content": "second question"}
+    assert memory.get_history(tid)[-1] == {"role": "assistant",
+                                           "content": "hello back"}

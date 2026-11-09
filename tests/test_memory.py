@@ -697,3 +697,39 @@ def test_history_with_ids_before_id_wins_over_offset(memdb):
     page = memdb.get_history_with_ids(tid, limit=2, before_id=other_id)
     assert [m["content"] for m in page] == ["q2", "a2"]
     assert all(m["content"] != "elsewhere" for m in page)
+
+
+def test_last_message_returns_newest_with_id(memdb):
+    tid = memdb.create_thread("t")
+    assert memdb.last_message(tid) is None
+    memdb.add_message(tid, "user", "q")
+    memdb.add_message(tid, "assistant", "a")
+    last = memdb.last_message(tid)
+    assert last["role"] == "assistant" and last["content"] == "a"
+    assert isinstance(last["id"], int)
+    assert memdb.last_message("nope-not-real") is None
+
+
+def test_drop_last_assistant_only_drops_assistant_tail(memdb):
+    tid = memdb.create_thread("t")
+    assert memdb.drop_last_assistant(tid) is False  # empty thread
+    memdb.add_message(tid, "user", "q1")
+    # Tail is the user's prompt: dropping must not eat it — the reply
+    # never landed, so there is nothing stored to replace.
+    assert memdb.drop_last_assistant(tid) is False
+    assert memdb.get_history(tid) == [{"role": "user", "content": "q1"}]
+    memdb.add_message(tid, "assistant", "a1")
+    memdb.add_message(tid, "user", "q2")
+    # Newest is a user message again: the older assistant reply is
+    # not the tail, so it stays.
+    assert memdb.drop_last_assistant(tid) is False
+    memdb.add_message(tid, "assistant", "a2")
+    assert memdb.drop_last_assistant(tid) is True
+    assert [(m["role"], m["content"]) for m in memdb.get_history(tid)] == [
+        ("user", "q1"), ("assistant", "a1"), ("user", "q2")]
+    # The other thread's tail is untouched.
+    other = memdb.create_thread("other")
+    memdb.add_message(other, "assistant", "elsewhere")
+    assert memdb.drop_last_assistant(tid) is False
+    assert memdb.get_history(other) == [
+        {"role": "assistant", "content": "elsewhere"}]

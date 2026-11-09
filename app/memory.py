@@ -123,6 +123,52 @@ def get_history_with_ids(tid: str, limit: int = 60,
             for r in reversed(rows)]
 
 
+def last_message(tid: str) -> dict | None:
+    """Newest message in a thread, {id, role, content}, or None.
+
+    Regenerate needs the tail without loading the whole thread: what
+    the last message is decides whether there is anything to redo
+    (assistant reply to replace, user prompt with no reply yet, or
+    nothing at all).
+    """
+    c = _conn()
+    row = c.execute(
+        "SELECT id, role, content FROM messages WHERE thread_id=? "
+        "ORDER BY id DESC LIMIT 1",
+        (tid,)).fetchone()
+    c.close()
+    if row is None:
+        return None
+    return {"id": row[0], "role": row[1], "content": row[2]}
+
+
+def drop_last_assistant(tid: str) -> bool:
+    """Delete the thread's newest message, but only if it is an
+    assistant reply. Returns False when the tail is a user message
+    (nothing stored to replace) or the thread is empty.
+
+    The role check matters: a blind \"delete newest\" on a thread
+    whose reply never got stored (turn errored before saving) would
+    eat the user's prompt instead of the reply it was meant to
+    replace. Regenerate calls this before re-running the turn so the
+    model never sees the stale reply in its history.
+    """
+    c = _conn()
+    row = c.execute(
+        "SELECT id, role FROM messages WHERE thread_id=? "
+        "ORDER BY id DESC LIMIT 1",
+        (tid,)).fetchone()
+    if row is None or row[1] != "assistant":
+        c.close()
+        return False
+    cur = c.execute("DELETE FROM messages WHERE id=? AND thread_id=?",
+                    (row[0], tid))
+    dropped = cur.rowcount > 0
+    c.commit()
+    c.close()
+    return dropped
+
+
 def delete_message(tid: str, mid: int) -> bool:
     """Delete one message. Returns False if that id is not in this thread.
 

@@ -78,7 +78,7 @@ Gmail needs the one-time Google connect (OAuth consent with offline access) to m
 
 ## Capabilities
 
-- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar (reopen a past thread with its full history, rename, delete, search titles and message content, search within an open thread with prev/next jumps and the matched words highlighted in the message, search every thread's messages at once and jump straight to the turn, load older messages on long threads, delete one message or cut a thread from a message onward)
+- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar (reopen a past thread with its full history, rename, delete, search titles and message content, search within an open thread with prev/next jumps and the matched words highlighted in the message, search every thread's messages at once and jump straight to the turn, load older messages on long threads, delete one message or cut a thread from a message onward, regenerate the last reply with a fresh answer)
 - Terminal + filesystem, sandboxed to `HARNESS_WORKDIR` (default `~/harness-work`); path escapes rejected
 - Web search (Bing RSS primary, DuckDuckGo fallback) + fetch, with SSRF guards (no localhost/private IPs/metadata hosts)
 - Controlled headless browser (open/click/fill/text) with automatic screenshots (Playwright)
@@ -107,6 +107,7 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `POST /api/threads/{id}/messages/{mid}/truncate` — delete a message and everything after it (retry a bad turn)
 - `PATCH /api/threads/{id}` — rename a thread (`{title, access_code}`)
 - `POST /api/chat` — SSE agent turn `{message, thread_id, access_code, model, web_search}`
+- `POST /api/threads/{id}/regenerate` — re-run the last turn: drops the stored assistant reply and answers the same last user message again over SSE (`{model, web_search, access_code}`); a reply that never landed just re-runs, and a last prompt that hits the boundary returns the refusal JSON instead of running the agent
 - `POST /api/run` — python/javascript code runner
 - `POST /api/shell` — terminal command
 - `GET /api/files`, `GET /api/preview`, `GET /api/shot/{name}`

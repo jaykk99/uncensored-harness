@@ -15,6 +15,7 @@ Endpoints:
   GET  /api/threads/{id}/messages/search — search within one thread's messages
   GET  /api/messages/search — search every thread's messages, jump to the turn
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
+  POST /api/threads/{id}/regenerate — redo the last turn, same prompt, new reply (SSE)
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
   GET  /api/files         — list workdir files (access_code)
@@ -64,6 +65,12 @@ class ChatRequest(BaseModel):
     access_code: str = ""
     model: str = ""        # preferred Horde model id from the UI picker ("" = auto)
     web_search: bool = False
+
+
+class RegenerateRequest(BaseModel):
+    model: str = ""        # preferred Horde model id ("" = auto)
+    web_search: bool = False
+    access_code: str = ""
 
 
 class RunRequest(BaseModel):
@@ -521,29 +528,16 @@ def index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
-@app.post("/api/chat")
-async def chat(req: ChatRequest):
-    _check_access(req.access_code)
-    message = (req.message or "").strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="empty message")
+def _stream_turn(thread_id: str, history: list[dict], model: str = "",
+                 web_search: bool = False) -> StreamingResponse:
+    """Stream one agent turn over SSE, storing the reply when it lands.
 
-    # Per-deployment refusal policy (app/guard_policy.py): this instance's
-    # own owner-written patterns. Ships empty — nothing extra refused until
-    # the owner adds an entry. The hard floor above always applies first.
-    hit = check_hard_boundary(message) or check_owner_boundary(message)
-    if hit:
-        thread_id = req.thread_id or memory.create_thread(message[:40])
-        memory.add_message(thread_id, "user", message)
-        reply = f"{hit.reason} {hit.alternative}"
-        memory.add_message(thread_id, "assistant", reply)
-        return {"thread_id": thread_id, "reply": reply, "blocked": True}
-
-    thread_id = (req.thread_id if req.thread_id and memory.thread_exists(req.thread_id)
-                 else memory.create_thread(message[:40]))
-    memory.add_message(thread_id, "user", message)
-    history = memory.get_history(thread_id)
-
+    Shared by /api/chat (fresh user message) and regenerate (same
+    prompt, new answer): the 11-minute cap, the 15s keepalive pings,
+    the timeout message stored as the assistant reply, and the error
+    event are identical in both cases, so they live here once instead
+    of drifting apart.
+    """
     async def stream():
         yield f"data: {json.dumps({'type': 'thread', 'thread_id': thread_id})}\n\n"
 
@@ -552,10 +546,7 @@ async def chat(req: ChatRequest):
         async def run_agent():
             try:
                 # agent uses a sync-style emit; adapt with a simple collector
-                events: list[dict] = []
-
                 async def collect(ev: dict):
-                    events.append(ev)
                     await queue.put(f"data: {json.dumps(ev)}\n\n")
 
                 # Hard cap: a turn must never "think forever". If the model
@@ -563,8 +554,8 @@ async def chat(req: ChatRequest):
                 try:
                     text = await asyncio.wait_for(
                         agent_mod.run_turn(history, collect,
-                                           model=req.model or "",
-                                           web_search=req.web_search),
+                                           model=model,
+                                           web_search=web_search),
                         timeout=660)
                 except asyncio.TimeoutError:
                     err = ("Timed out after 11 minutes with no answer. "
@@ -613,6 +604,71 @@ async def chat(req: ChatRequest):
         await task
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/api/chat")
+async def chat(req: ChatRequest):
+    _check_access(req.access_code)
+    message = (req.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="empty message")
+
+    # Per-deployment refusal policy (app/guard_policy.py): this instance's
+    # own owner-written patterns. Ships empty — nothing extra refused until
+    # the owner adds an entry. The hard floor above always applies first.
+    hit = check_hard_boundary(message) or check_owner_boundary(message)
+    if hit:
+        thread_id = req.thread_id or memory.create_thread(message[:40])
+        memory.add_message(thread_id, "user", message)
+        reply = f"{hit.reason} {hit.alternative}"
+        memory.add_message(thread_id, "assistant", reply)
+        return {"thread_id": thread_id, "reply": reply, "blocked": True}
+
+    thread_id = (req.thread_id if req.thread_id and memory.thread_exists(req.thread_id)
+                 else memory.create_thread(message[:40]))
+    memory.add_message(thread_id, "user", message)
+    history = memory.get_history(thread_id)
+    return _stream_turn(thread_id, history, model=req.model or "",
+                        web_search=req.web_search)
+
+
+@app.post("/api/threads/{thread_id}/regenerate")
+async def thread_regenerate(thread_id: str, req: RegenerateRequest):
+    """Re-run the last turn: drop the stored assistant reply (if one
+    landed) and answer the same last user message again, streaming
+    the new reply over SSE exactly like /api/chat.
+
+    The old reply is dropped before the turn runs so the model never
+    sees the stale answer in its history. When the last message is
+    the user's own (the reply never got stored — the turn errored
+    before saving), there is nothing to drop and the same prompt
+    just runs again. A last user message that hits the hard boundary
+    now is refused the same way /api/chat refuses it, and the stored
+    reply is replaced with that refusal instead of re-running the
+    agent on a blocked prompt.
+    """
+    _check_access(req.access_code)
+    if not memory.thread_exists(thread_id):
+        raise HTTPException(status_code=404, detail="no such thread")
+    messages = memory.get_all_messages(thread_id)
+    if not messages:
+        raise HTTPException(status_code=400, detail="empty thread")
+    last_user = next((m for m in reversed(messages)
+                      if m["role"] == "user"), None)
+    if last_user is None:
+        raise HTTPException(status_code=400,
+                            detail="no user message to regenerate from")
+    hit = (check_hard_boundary(last_user["content"])
+           or check_owner_boundary(last_user["content"]))
+    if hit:
+        memory.drop_last_assistant(thread_id)
+        reply = f"{hit.reason} {hit.alternative}"
+        memory.add_message(thread_id, "assistant", reply)
+        return {"thread_id": thread_id, "reply": reply, "blocked": True}
+    memory.drop_last_assistant(thread_id)
+    history = memory.get_history(thread_id)
+    return _stream_turn(thread_id, history, model=req.model or "",
+                        web_search=req.web_search)
 
 
 @app.post("/api/run")

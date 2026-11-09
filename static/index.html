@@ -291,6 +291,11 @@
     border: 0; border-radius: 12px; padding: 0 18px; font-size: 15px; font-weight: 600;
     cursor: pointer; display: none; }
   #stopbtn.visible { display: block; }
+  #regenbtn { flex-shrink: 0; height: 46px; background: transparent; color: var(--dim);
+    border: 1px solid var(--border); border-radius: 12px; padding: 0 14px; font-size: 14px;
+    cursor: pointer; display: none; }
+  #regenbtn.visible { display: block; }
+  #regenbtn:hover { color: var(--text); border-color: var(--accent); }
   #hint { max-width: 820px; margin: 8px auto 0; font-size: 11px; color: var(--dim); text-align: center; }
 
   /* ---------- image view ---------- */
@@ -523,6 +528,7 @@
           <textarea id="msg" placeholder="Ask anything..." rows="1"></textarea>
           <button id="send">Send</button>
           <button id="stopbtn">Stop</button>
+          <button id="regenbtn" title="Regenerate last reply">&#8635; Regenerate</button>
         </div>
         <div id="hint">Enter to send, Shift+Enter for a new line. Horde primary, Pollinations fallback.</div>
       </div>
@@ -828,7 +834,7 @@ modeImage.onclick = () => showView("image");
 modeSys.onclick = () => showView("sys");
 termbtn.onclick = () => showView(curView === "term" ? "chat" : "term");
 $("newchatbtn").onclick = () => { newChat(); showView("chat"); };
-function newChat() { threadId = ""; $("chat").querySelectorAll(".msg").forEach(e => e.remove()); const lb = $("loadolderbtn"); if (lb) lb.remove(); $("welcome").style.display = ""; clearMsgSearch(); $("msgsearch").classList.remove("visible"); }
+function newChat() { threadId = ""; $("chat").querySelectorAll(".msg").forEach(e => e.remove()); const lb = $("loadolderbtn"); if (lb) lb.remove(); $("welcome").style.display = ""; clearMsgSearch(); $("msgsearch").classList.remove("visible"); updateRegenBtn(); }
 
 /* mobile drawer */
 const sidebar = $("sidebar"), scrim = $("scrim");
@@ -1146,6 +1152,130 @@ msgEl.addEventListener("input", () => {
   msgEl.style.height = "auto";
   msgEl.style.height = Math.min(msgEl.scrollHeight, 180) + "px";
 });
+/* Read one streamed turn (SSE) into bubble. Shared by send() and
+   regenerate(): the event handling — thinking, text/token, tools,
+   shots, error, done — is identical for a fresh message and a
+   re-run. Returns true when a terminal done/error event arrived.
+   A JSON body instead of SSE is a blocked reply (/api/chat and
+   /api/threads/{id}/regenerate both answer blocked prompts with
+   JSON, not a stream): render the refusal text instead of treating
+   the missing stream as a dropped connection. */
+async function pumpStream(r, bubble) {
+  const ct = r.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    let d = null;
+    try { d = await r.json(); } catch (e) { /* not JSON after all */ }
+    if (d && d.blocked && d.reply) {
+      clearThinking(bubble);
+      appendText(bubble, d.reply);
+      return true;
+    }
+    return false;
+  }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let gotTerminal = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const parts = buf.split("\n\n");
+    buf = parts.pop();
+    for (const p of parts) {
+      const line = p.trim();
+      if (!line.startsWith("data:")) continue;
+      let ev;
+      try { ev = JSON.parse(line.slice(5)); } catch (e) { continue; }
+      if (ev.type === "thread") {
+        // The find bar used to appear only on openThread(), so a
+        // fresh chat had no in-thread search during (or after) its
+        // first live turn until the thread was reopened from the
+        // sidebar. A live turn is when the thread id first becomes
+        // known, so show the bar here too. A changed id means a
+        // different thread: drop the old thread's matches.
+        if (msgSearchThreadId !== ev.thread_id) {
+          clearMsgSearch(); msgSearchThreadId = ev.thread_id;
+        }
+        threadId = ev.thread_id;
+        $("msgsearch").classList.add("visible");
+      }
+      else if (ev.type === "thinking") setThinking(bubble, ev.text);
+      else if (ev.type === "text" || ev.type === "token") appendText(bubble, ev.text);
+      else if (ev.type === "tool") appendTool(bubble, ev.name, ev.args);
+      else if (ev.type === "tool_result") appendToolResult(bubble, ev.name, ev.output);
+      else if (ev.type === "shot") appendShot(bubble, ev.shot, ev.caption);
+      else if (ev.type === "error") { gotTerminal = true; appendError(bubble, ev.error); }
+      else if (ev.type === "done") {
+        gotTerminal = true;
+        clearThinking(bubble);
+        $("routeinfo").innerHTML = "last route: <b>" + esc(ev.model || "?") + "</b>";
+      }
+    }
+  }
+  return gotTerminal;
+}
+
+/* Regenerate: drop the last assistant reply (server-side) and
+   re-run the same last user prompt. The old bubble is removed from
+   view up front so the fresh reply streams into a clean bubble; on
+   a failed request the thread is reloaded so the transcript stays
+   honest with what is stored. */
+const regenBtn = $("regenbtn");
+function updateRegenBtn() {
+  const can = !!threadId && !sending &&
+    chat.querySelectorAll(".msg.assistant").length > 0;
+  regenBtn.classList.toggle("visible", can);
+}
+async function regenerate() {
+  if (!threadId || sending) return;
+  const lastA = chat.querySelectorAll(".msg.assistant");
+  if (!lastA.length) return;
+  sending = true;
+  sendBtn.disabled = true;
+  sendBtn.style.display = "none";
+  stopBtn.classList.add("visible");
+  regenBtn.classList.remove("visible");
+  aborter = new AbortController();
+  // 12 minute client backstop on top of the server 11 minute cap
+  const backstop = setTimeout(() => { if (aborter) aborter.abort(); }, 12 * 60 * 1000);
+  lastA[lastA.length - 1].remove();
+  const bubble = newAssistant();
+  setThinking(bubble, "Thinking...");
+  try {
+    const r = await fetch("/api/threads/" + encodeURIComponent(threadId) + "/regenerate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_code: AC, model: modelParamFor(selModel), web_search: webSearch,
+      }),
+      signal: aborter.signal,
+    });
+    if (!r.ok) { appendError(bubble, "HTTP " + r.status); openThread(threadId); return; }
+    const gotTerminal = await pumpStream(r, bubble);
+    // The stream ended without a done or error event. The connection was
+    // killed mid-turn (proxy timeout, network drop). Say so plainly instead
+    // of leaving a frozen thinking spinner.
+    if (!gotTerminal) {
+      clearThinking(bubble);
+      appendError(bubble, "Connection dropped before the model finished. Try again.");
+    }
+  } catch (e) {
+    if (e.name === "AbortError") appendError(bubble, "Stopped.");
+    else appendError(bubble, "failed: " + e);
+  } finally {
+    clearTimeout(backstop);
+    sending = false;
+    sendBtn.disabled = false;
+    sendBtn.style.display = "";
+    stopBtn.classList.remove("visible");
+    aborter = null;
+    loadThreads();
+    updateRegenBtn();
+  }
+}
+regenBtn.onclick = regenerate;
+
 async function send() {
   const raw = msgEl.value.trim();
   if ((!raw && attachments.length === 0) || sending) return;
@@ -1174,47 +1304,7 @@ async function send() {
       signal: aborter.signal,
     });
     if (!r.ok) { appendError(bubble, "HTTP " + r.status); return; }
-    const reader = r.body.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
-    let gotTerminal = false;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const parts = buf.split("\n\n");
-      buf = parts.pop();
-      for (const p of parts) {
-        const line = p.trim();
-        if (!line.startsWith("data:")) continue;
-        let ev;
-        try { ev = JSON.parse(line.slice(5)); } catch (e) { continue; }
-        if (ev.type === "thread") {
-          // The find bar used to appear only on openThread(), so a
-          // fresh chat had no in-thread search during (or after) its
-          // first live turn until the thread was reopened from the
-          // sidebar. A live turn is when the thread id first becomes
-          // known, so show the bar here too. A changed id means a
-          // different thread: drop the old thread's matches.
-          if (msgSearchThreadId !== ev.thread_id) {
-            clearMsgSearch(); msgSearchThreadId = ev.thread_id;
-          }
-          threadId = ev.thread_id;
-          $("msgsearch").classList.add("visible");
-        }
-        else if (ev.type === "thinking") setThinking(bubble, ev.text);
-        else if (ev.type === "text" || ev.type === "token") appendText(bubble, ev.text);
-        else if (ev.type === "tool") appendTool(bubble, ev.name, ev.args);
-        else if (ev.type === "tool_result") appendToolResult(bubble, ev.name, ev.output);
-        else if (ev.type === "shot") appendShot(bubble, ev.shot, ev.caption);
-        else if (ev.type === "error") { gotTerminal = true; appendError(bubble, ev.error); }
-        else if (ev.type === "done") {
-          gotTerminal = true;
-          clearThinking(bubble);
-          $("routeinfo").innerHTML = "last route: <b>" + esc(ev.model || "?") + "</b>";
-        }
-      }
-    }
+    const gotTerminal = await pumpStream(r, bubble);
     // The stream ended without a done or error event. The connection was
     // killed mid-turn (proxy timeout, network drop). Say so plainly instead
     // of leaving a frozen thinking spinner.
@@ -1233,6 +1323,7 @@ async function send() {
     stopBtn.classList.remove("visible");
     aborter = null;
     loadThreads();
+    updateRegenBtn();
   }
 }
 sendBtn.onclick = send;
@@ -1366,6 +1457,7 @@ async function openThread(id) {
     $("welcome").style.display = "none";
     loadOlderBtn(d.total - (d.messages || []).length);
     chat.scrollTop = chat.scrollHeight;
+    updateRegenBtn();
     loadThreads(); closeDrawer();
   } catch (e) { toast("Could not open thread.", true); }
 }

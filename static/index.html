@@ -182,6 +182,13 @@
   .msgtools button { background: none; border: none; color: var(--dim);
     font-size: 12px; cursor: pointer; padding: 0; }
   .msgtools button:hover { color: var(--accent); }
+  /* Inline message editor: the bubble's content swaps for a textarea
+     while editing, so a fix does not need a truncate and a retype. */
+  .msgedit textarea { width: 100%; box-sizing: border-box; min-height: 80px;
+    padding: 8px 10px; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    font: inherit; font-size: 14px; resize: vertical; }
+  .msgedit .row { display: flex; gap: 8px; margin-top: 8px; }
   /* In-thread message search: a slim find bar above the transcript,
      shown only while a thread is open. All loaded matches get a faint
      outline; the current one gets the accent outline so prev/next
@@ -939,17 +946,24 @@ function addUser(text, opts) {
   chat.appendChild(d); chat.scrollTop = chat.scrollHeight;
   return d;
 }
-/* Hover tools for one reopened message: delete just it, or cut the
-   thread from it onward. After a successful prune the thread is
-   re-rendered from the server, so counts and the "load older"
-   button stay honest instead of being patched up by hand. */
-function addMsgTools(msgEl, id) {
+/* Hover tools for one reopened message: delete just it, cut the
+   thread from it onward, or edit its text. After a successful prune
+   the thread is re-rendered from the server, so counts and the "load
+   older" button stay honest instead of being patched up by hand.
+   The raw content rides on the element (dataset.raw): an assistant
+   bubble holds rendered markdown, so the editor could not recover
+   the stored text from the DOM alone. */
+function addMsgTools(msgEl, id, role, content) {
   if (!msgEl || id == null) return;
   // Addressable by id, so in-thread search can jump straight to this
   // message (and delete/truncate already use the same id).
   msgEl.dataset.msgId = String(id);
+  msgEl.dataset.raw = content || "";
   const tools = document.createElement("div");
   tools.className = "msgtools";
+  const edit = document.createElement("button");
+  edit.textContent = "Edit";
+  edit.onclick = () => editMessage(msgEl, id, role);
   const del = document.createElement("button");
   del.textContent = "Delete message";
   del.onclick = async () => {
@@ -976,8 +990,100 @@ function addMsgTools(msgEl, id) {
       openThread(threadId);
     } catch (e) { toast("Could not cut the thread there.", true); }
   };
-  tools.appendChild(del); tools.appendChild(trunc);
+  tools.appendChild(edit); tools.appendChild(del); tools.appendChild(trunc);
   msgEl.appendChild(tools);
+}
+/* Edit a reopened message in place. Save fixes the stored text;
+   "Save & resend" (user messages only) also cuts everything after
+   the message and re-runs the turn from the new wording, streaming
+   the fresh reply like regenerate(). Editing is blocked mid-turn:
+   a save re-renders the thread, which would wipe the live stream.
+   Cancel restores the bubble from its saved markup, no fetch. */
+function editMessage(msgEl, id, role) {
+  if (sending) { toast("Wait for the current turn to finish before editing.", true); return; }
+  const bubble = msgEl.querySelector(".bubble");
+  if (!bubble) return;
+  const orig = bubble.innerHTML;
+  bubble.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "msgedit";
+  const ta = document.createElement("textarea");
+  ta.value = msgEl.dataset.raw || "";
+  const row = document.createElement("div");
+  row.className = "row";
+  const save = document.createElement("button");
+  save.className = "pbtn"; save.textContent = "Save";
+  const cancel = document.createElement("button");
+  cancel.className = "pbtn"; cancel.textContent = "Cancel";
+  cancel.onclick = () => { bubble.innerHTML = orig; };
+  if (role === "user") {
+    const resend = document.createElement("button");
+    resend.className = "pbtn"; resend.textContent = "Save & resend";
+    resend.onclick = () => doEdit(true);
+    row.appendChild(resend);
+  }
+  row.appendChild(save); row.appendChild(cancel);
+  wrap.appendChild(ta); wrap.appendChild(row);
+  bubble.appendChild(wrap);
+  ta.focus();
+  async function doEdit(resend) {
+    const text = ta.value.trim();
+    if (!text) { toast("Message cannot be empty.", true); return; }
+    try {
+      const r = await fetch("/api/threads/" + encodeURIComponent(threadId) +
+        "/messages/" + encodeURIComponent(id) + "/edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: text, resend,
+          model: modelParamFor(selModel), web_search: webSearch,
+          access_code: AC }),
+      });
+      if (!r.ok) throw new Error("edit failed");
+      if (!resend) { openThread(threadId); return; }
+      // Resend: drop this message and everything after it from view,
+      // then stream the fresh reply into a clean bubble. The server
+      // already cut the stored tail, so the transcript on screen just
+      // has to match what is stored.
+      sending = true;
+      sendBtn.disabled = true;
+      sendBtn.style.display = "none";
+      stopBtn.classList.add("visible");
+      regenBtn.classList.remove("visible");
+      aborter = new AbortController();
+      const backstop = setTimeout(() => { if (aborter) aborter.abort(); }, 12 * 60 * 1000);
+      let next = msgEl;
+      while (next) {
+        const cur = next;
+        next = next.nextElementSibling;
+        if (cur.classList && cur.classList.contains("msg")) cur.remove();
+      }
+      const replyBubble = newAssistant();
+      setThinking(replyBubble, "Thinking...");
+      try {
+        const gotTerminal = await pumpStream(r, replyBubble);
+        if (!gotTerminal) {
+          clearThinking(replyBubble);
+          appendError(replyBubble, "Connection dropped before the model finished. Try again.");
+        }
+      } catch (e) {
+        if (e.name === "AbortError") appendError(replyBubble, "Stopped.");
+        else appendError(replyBubble, "failed: " + e);
+      } finally {
+        clearTimeout(backstop);
+        sending = false;
+        sendBtn.disabled = false;
+        sendBtn.style.display = "";
+        stopBtn.classList.remove("visible");
+        aborter = null;
+        loadThreads();
+        updateRegenBtn();
+      }
+    } catch (e) {
+      toast("Could not edit that message.", true);
+      openThread(threadId);
+    }
+  }
+  save.onclick = () => doEdit(false);
 }
 function newAssistant() {
   hideWelcome();
@@ -1372,12 +1478,12 @@ function renderThreadMessages(msgs) {
   const staleBtn = $("loadolderbtn");
   if (staleBtn) staleBtn.remove();
   (msgs || []).forEach(m => {
-    if (m.role === "user") { addMsgTools(addUser(m.content), m.id); return; }
+    if (m.role === "user") { addMsgTools(addUser(m.content), m.id, m.role, m.content); return; }
     const bubble = newAssistant();
     bubble.innerHTML = renderMarkdown(m.content);
     decorateCodeBlocks(bubble);
     addPreviewButtons(bubble);
-    addMsgTools(bubble.parentElement, m.id);
+    addMsgTools(bubble.parentElement, m.id, m.role, m.content);
   });
 }
 /* One older page, shared by the button and by in-thread search jumps:
@@ -1407,13 +1513,13 @@ async function loadOlderMessages() {
     const anchor = chat.querySelector(".msg");
     const beforeH = chat.scrollHeight;
     older.forEach(m => {
-      if (m.role === "user") { addMsgTools(addUser(m.content), m.id); }
+      if (m.role === "user") { addMsgTools(addUser(m.content), m.id, m.role, m.content); }
       else {
         const bubble = newAssistant();
         bubble.innerHTML = renderMarkdown(m.content);
         decorateCodeBlocks(bubble);
         addPreviewButtons(bubble);
-        addMsgTools(bubble.parentElement, m.id);
+        addMsgTools(bubble.parentElement, m.id, m.role, m.content);
       }
       // addUser/newAssistant append at the bottom; move the new
       // message up before the previously-oldest one, in order.

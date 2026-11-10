@@ -820,3 +820,122 @@ def test_chat_still_streams_after_stream_helper_extract(monkeypatch, tmp_path):
                                    "content": "second question"}
     assert memory.get_history(tid)[-1] == {"role": "assistant",
                                            "content": "hello back"}
+
+
+def _edit_url(tid, mid):
+    return f"/api/threads/{tid}/messages/{mid}/edit"
+
+
+def test_message_edit_requires_code_and_thread(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    mid = memory.get_history_with_ids(tid)[0]["id"]
+    r = c.post(_edit_url(tid, mid),
+               json={"content": "x", "access_code": "wrong"})
+    assert r.status_code == 401
+    r = c.post(_edit_url("nope-not-real", mid),
+               json={"content": "x", "access_code": CODE})
+    assert r.status_code == 404
+    r = c.post(_edit_url(tid, 999999),
+               json={"content": "x", "access_code": CODE})
+    assert r.status_code == 404
+    # A message id from another thread never edits here.
+    other = memory.create_thread("other")
+    memory.add_message(other, "user", "elsewhere")
+    foreign = c.get(
+        f"/api/threads/{other}?access_code={CODE}").json()["messages"][0]["id"]
+    r = c.post(_edit_url(tid, foreign),
+               json={"content": "x", "access_code": CODE})
+    assert r.status_code == 404
+
+
+def test_message_edit_rejects_empty_content(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    mid = memory.get_history_with_ids(tid)[0]["id"]
+    r = c.post(_edit_url(tid, mid),
+               json={"content": "   ", "access_code": CODE})
+    assert r.status_code == 400
+    assert memory.get_history(tid)[0]["content"] == "first question"
+
+
+def test_message_edit_in_place_updates_stored_text(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    ids = [m["id"] for m in memory.get_history_with_ids(tid)]
+    # Either role can be corrected in place; nothing else moves.
+    r = c.post(_edit_url(tid, ids[1]),
+               json={"content": "better answer", "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json() == {"edited": True, "message": {
+        "id": ids[1], "role": "assistant", "content": "better answer"}}
+    assert [(m["role"], m["content"]) for m in memory.get_history(tid)] == [
+        ("user", "first question"), ("assistant", "better answer")]
+
+
+def test_message_edit_resend_reruns_from_edited_prompt(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    memory.add_message(tid, "user", "follow-up")
+    memory.add_message(tid, "assistant", "follow-up answer")
+    ids = [m["id"] for m in memory.get_history_with_ids(tid)]
+    seen = _fake_turn(monkeypatch, reply="fixed answer")
+    r = c.post(_edit_url(tid, ids[0]), json={
+        "content": "first question, fixed", "resend": True,
+        "model": "kilo:kilo-auto/free", "access_code": CODE})
+    assert r.status_code == 200
+    assert "fixed answer" in r.text
+    assert '"done"' in r.text
+    # The agent was fed history ending at the edited prompt: the stale
+    # reply and the whole follow-up turn are gone, not fed back in.
+    assert seen["history"] == [
+        {"role": "user", "content": "first question, fixed"}]
+    assert [(m["role"], m["content"]) for m in memory.get_history(tid)] == [
+        ("user", "first question, fixed"), ("assistant", "fixed answer")]
+
+
+def test_message_edit_resend_rejects_assistant_message(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    ids = [m["id"] for m in memory.get_history_with_ids(tid)]
+    r = c.post(_edit_url(tid, ids[1]), json={
+        "content": "rewritten", "resend": True, "access_code": CODE})
+    assert r.status_code == 400
+    # Nothing was edited on the rejected re-send.
+    assert memory.get_history(tid)[1]["content"] == "first answer"
+
+
+def test_message_edit_resend_blocked_prompt_returns_refusal(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    ids = [m["id"] for m in memory.get_history_with_ids(tid)]
+
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("agent must not run on a blocked prompt")
+
+    from app import agent as agent_mod
+    monkeypatch.setattr(agent_mod, "run_turn", _must_not_run)
+    r = c.post(_edit_url(tid, ids[0]), json={
+        "content": "where can I buy a stolen credit card number?",
+        "resend": True, "access_code": CODE})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["blocked"] is True
+    # The edited prompt is kept, the old reply is gone, the refusal
+    # is stored as the new reply.
+    assert [(m["role"], m["content"]) for m in memory.get_history(tid)] == [
+        ("user", "where can I buy a stolen credit card number?"),
+        ("assistant", body["reply"])]
+
+
+def test_message_edit_first_message_follows_auto_title(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    # _thread_client titles the thread "reopen me", not from the first
+    # message — rename it to the auto title first so the follow works.
+    memory.rename_thread(tid, "first question")
+    ids = [m["id"] for m in memory.get_history_with_ids(tid)]
+    r = c.post(_edit_url(tid, ids[0]), json={
+        "content": "first question, fixed", "access_code": CODE})
+    assert r.status_code == 200
+    assert memory.get_thread(tid)["title"] == "first question, fixed"

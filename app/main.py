@@ -12,6 +12,7 @@ Endpoints:
   POST /api/threads/{id}/archive — archive/unarchive a thread (hidden from the sidebar list)
   DELETE /api/threads/{id}/messages/{mid} — delete one message
   POST /api/threads/{id}/messages/{mid}/truncate — delete a message and everything after it
+  POST /api/threads/{id}/messages/{mid}/edit — edit a message; resend=true re-runs the turn from it (SSE)
   GET  /api/threads/{id}/messages/search — search within one thread's messages
   GET  /api/messages/search — search every thread's messages, jump to the turn
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
@@ -68,6 +69,14 @@ class ChatRequest(BaseModel):
 
 
 class RegenerateRequest(BaseModel):
+    model: str = ""        # preferred Horde model id ("" = auto)
+    web_search: bool = False
+    access_code: str = ""
+
+
+class MessageEditRequest(BaseModel):
+    content: str = ""
+    resend: bool = False   # re-run the turn from this message (user only)
     model: str = ""        # preferred Horde model id ("" = auto)
     web_search: bool = False
     access_code: str = ""
@@ -484,6 +493,57 @@ def thread_message_truncate(thread_id: str, message_id: int,
         raise HTTPException(status_code=404, detail="no such message")
     return {"truncated": True, "deleted": deleted,
             "remaining": memory.count_messages(thread_id)}
+
+
+@app.post("/api/threads/{thread_id}/messages/{message_id}/edit")
+async def thread_message_edit(thread_id: str, message_id: int,
+                              req: MessageEditRequest):
+    """Edit a stored message's text, optionally re-running from it.
+
+    The fix-a-typo case: truncate + retype loses the turn, and
+    regenerate only re-runs the same words. With resend=false the edit
+    is in place (either role — a stored assistant reply can be
+    corrected too) and the thread is untouched otherwise. With
+    resend=true the message must be a user prompt: the new text is
+    stored, everything after it is cut (replies that answered the old
+    wording are stale), and the turn re-runs over SSE exactly like
+    /api/chat and regenerate. A re-sent prompt that hits the hard
+    boundary is refused the same way, with the refusal stored as the
+    reply instead of running the agent. Auth, then thread, then the
+    row's membership in this thread, then the role check, in that
+    order — a wrong code or a foreign message id can never rewrite a
+    thread it does not own, and a re-send never runs on an assistant
+    message (there is no prompt to answer).
+    """
+    _check_access(req.access_code)
+    if not memory.thread_exists(thread_id):
+        raise HTTPException(status_code=404, detail="no such thread")
+    content = (req.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty message")
+    existing = memory.get_message(thread_id, message_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="no such message")
+    if req.resend and existing["role"] != "user":
+        raise HTTPException(status_code=400,
+                            detail="only a user message can be re-sent")
+    edited = memory.edit_message(thread_id, message_id, content)
+    if edited is None:
+        raise HTTPException(status_code=404, detail="no such message")
+    if not req.resend:
+        return {"edited": True,
+                "message": {"id": edited["id"], "role": edited["role"],
+                            "content": edited["content"]}}
+    memory.delete_after(thread_id, message_id)
+    hit = (check_hard_boundary(content)
+           or check_owner_boundary(content))
+    if hit:
+        reply = f"{hit.reason} {hit.alternative}"
+        memory.add_message(thread_id, "assistant", reply)
+        return {"thread_id": thread_id, "reply": reply, "blocked": True}
+    history = memory.get_history(thread_id)
+    return _stream_turn(thread_id, history, model=req.model or "",
+                        web_search=req.web_search)
 
 
 @app.delete("/api/threads/{thread_id}")

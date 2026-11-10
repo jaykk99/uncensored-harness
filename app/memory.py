@@ -169,6 +169,87 @@ def drop_last_assistant(tid: str) -> bool:
     return dropped
 
 
+def get_message(tid: str, mid: int) -> dict | None:
+    """One message by row id, {id, role, content}, or None.
+
+    The edit endpoint needs the message's role before it can decide
+    whether a re-send is allowed, and a bare UPDATE cannot tell a
+    missing row from a foreign one. Same thread_id guard as
+    delete_message: a foreign id never resolves here.
+    """
+    c = _conn()
+    row = c.execute(
+        "SELECT id, role, content FROM messages WHERE id=? AND thread_id=?",
+        (mid, tid)).fetchone()
+    c.close()
+    if row is None:
+        return None
+    return {"id": row[0], "role": row[1], "content": row[2]}
+
+
+def edit_message(tid: str, mid: int, content: str) -> dict | None:
+    """Replace one message's stored content.
+
+    The fix-a-typo case: retyping a prompt after a truncate loses the
+    turn, and regenerate only re-runs the same words. Returns the
+    updated message plus the old content, or None when that id is not
+    in this thread (nothing is edited on a miss — same guard as
+    delete_message). Callers validate non-empty content first.
+    When the edited message is the thread's first and the title is
+    still the auto title from creation (first 40 chars of the old
+    first message), the title follows the edit so the sidebar does not
+    keep showing the discarded wording; a renamed title is left alone.
+    """
+    c = _conn()
+    row = c.execute(
+        "SELECT role, content FROM messages WHERE id=? AND thread_id=?",
+        (mid, tid)).fetchone()
+    if row is None:
+        c.close()
+        return None
+    role, old = row
+    c.execute("UPDATE messages SET content=? WHERE id=? AND thread_id=?",
+              (content, mid, tid))
+    oldest = c.execute(
+        "SELECT id FROM messages WHERE thread_id=? ORDER BY id ASC LIMIT 1",
+        (tid,)).fetchone()
+    if oldest and oldest[0] == mid:
+        title_row = c.execute(
+            "SELECT title FROM threads WHERE id=?", (tid,)).fetchone()
+        if title_row and title_row[0] == (old or "")[:40]:
+            c.execute("UPDATE threads SET title=? WHERE id=?",
+                      (content[:40], tid))
+    c.commit()
+    c.close()
+    return {"id": mid, "role": role, "content": content, "old_content": old}
+
+
+def delete_after(tid: str, mid: int) -> int:
+    """Delete every message after one row, keeping the row itself.
+
+    The edit-and-resend case: the edited user message stays, but the
+    replies that answered the old wording are stale and must go before
+    the turn re-runs, or the model would see answers to a prompt that
+    no longer exists. Returns how many rows were deleted, 0 when that
+    id is not in this thread (nothing is cut on a miss — a truncate
+    must never silently eat the wrong thread's tail).
+    """
+    c = _conn()
+    anchor = c.execute(
+        "SELECT 1 FROM messages WHERE id=? AND thread_id=?",
+        (mid, tid)).fetchone()
+    if not anchor:
+        c.close()
+        return 0
+    cur = c.execute(
+        "DELETE FROM messages WHERE thread_id=? AND id>?",
+        (tid, mid))
+    deleted = cur.rowcount
+    c.commit()
+    c.close()
+    return deleted
+
+
 def delete_message(tid: str, mid: int) -> bool:
     """Delete one message. Returns False if that id is not in this thread.
 

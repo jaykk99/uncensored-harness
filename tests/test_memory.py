@@ -733,3 +733,69 @@ def test_drop_last_assistant_only_drops_assistant_tail(memdb):
     assert memdb.drop_last_assistant(tid) is False
     assert memdb.get_history(other) == [
         {"role": "assistant", "content": "elsewhere"}]
+
+
+def test_get_message_returns_row_or_none(memdb):
+    tid, ids = _prune_thread(memdb)
+    other = memdb.create_thread("other")
+    assert memdb.get_message(tid, ids[1]) == {
+        "id": ids[1], "role": "assistant", "content": "a1"}
+    assert memdb.get_message(tid, 999999) is None
+    # A foreign id never resolves here.
+    assert memdb.get_message(other, ids[0]) is None
+
+
+def test_edit_message_replaces_content_and_reports_old(memdb):
+    tid, ids = _prune_thread(memdb)
+    edited = memdb.edit_message(tid, ids[2], "q2 fixed")
+    assert edited == {"id": ids[2], "role": "user", "content": "q2 fixed",
+                      "old_content": "q2"}
+    assert [m["content"] for m in memdb.get_history(tid)] == [
+        "q1", "a1", "q2 fixed", "a2"]
+
+
+def test_edit_message_unknown_or_foreign_edits_nothing(memdb):
+    tid, ids = _prune_thread(memdb)
+    other = memdb.create_thread("other")
+    assert memdb.edit_message(tid, 999999, "nope") is None
+    assert memdb.edit_message(other, ids[0], "nope") is None
+    assert [m["content"] for m in memdb.get_history(tid)] == [
+        "q1", "a1", "q2", "a2"]
+
+
+def test_edit_first_message_follows_auto_title(memdb):
+    tid = memdb.create_thread("what is the capital of France?")
+    memdb.add_message(tid, "user", "what is the capital of France?")
+    memdb.add_message(tid, "assistant", "Paris.")
+    ids = [m["id"] for m in memdb.get_history_with_ids(tid)]
+    memdb.edit_message(tid, ids[0], "what is the capital of Germany?")
+    assert memdb.get_thread(tid)["title"] == "what is the capital of Germany?"
+    # Editing a later message leaves the title alone.
+    memdb.edit_message(tid, ids[1], "Berlin, actually.")
+    assert memdb.get_thread(tid)["title"] == "what is the capital of Germany?"
+
+
+def test_edit_first_message_leaves_renamed_title_alone(memdb):
+    tid = memdb.create_thread("what is the capital of France?")
+    memdb.add_message(tid, "user", "what is the capital of France?")
+    memdb.add_message(tid, "assistant", "Paris.")
+    memdb.rename_thread(tid, "capitals")
+    ids = [m["id"] for m in memdb.get_history_with_ids(tid)]
+    memdb.edit_message(tid, ids[0], "what is the capital of Germany?")
+    assert memdb.get_thread(tid)["title"] == "capitals"
+
+
+def test_delete_after_keeps_anchor_and_cuts_tail(memdb):
+    tid, ids = _prune_thread(memdb)
+    assert memdb.delete_after(tid, ids[1]) == 2
+    assert [m["content"] for m in memdb.get_history(tid)] == ["q1", "a1"]
+    # Cutting after the last message deletes nothing.
+    assert memdb.delete_after(tid, ids[1]) == 0
+
+
+def test_delete_after_unknown_or_foreign_cuts_nothing(memdb):
+    tid, ids = _prune_thread(memdb)
+    other = memdb.create_thread("other")
+    assert memdb.delete_after(tid, 999999) == 0
+    assert memdb.delete_after(other, ids[0]) == 0
+    assert len(memdb.get_history(tid)) == 4

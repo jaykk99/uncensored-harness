@@ -1317,6 +1317,13 @@ async function pumpStream(r, bubble) {
         clearThinking(bubble);
         $("routeinfo").innerHTML = "last route: <b>" + esc(ev.model || "?") + "</b>";
       }
+      else if (ev.type === "stopped") {
+        // The server stopped the turn at its next boundary and stored
+        // the partial reply with this marker; show the same marker so
+        // the bubble on screen matches the stored transcript.
+        gotTerminal = true;
+        appendText(bubble, "\n[stopped by user]");
+      }
     }
   }
   return gotTerminal;
@@ -1433,7 +1440,21 @@ async function send() {
   }
 }
 sendBtn.onclick = send;
-stopBtn.onclick = () => { if (aborter) aborter.abort(); };
+// Stop used to only abort the browser's fetch: the server turn kept
+// running to its 11-minute cap and stored the full reply anyway. Tell
+// the server to stop the turn first (POST /api/threads/{id}/stop), then
+// abort the local stream. The stop fetch is independent of the
+// AbortController, so aborting cannot cancel it.
+stopBtn.onclick = () => {
+  if (threadId) {
+    fetch("/api/threads/" + encodeURIComponent(threadId) + "/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ access_code: AC }),
+    }).catch(() => {});
+  }
+  if (aborter) aborter.abort();
+};
 msgEl.addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });

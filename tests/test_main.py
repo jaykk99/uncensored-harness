@@ -707,7 +707,8 @@ def _fake_turn(monkeypatch, reply="fresh answer"):
     from app import agent as agent_mod
     seen = {}
 
-    async def fake(history, emit, model="", web_search=False):
+    async def fake(history, emit, model="", web_search=False,
+                 should_stop=None):
         seen["history"] = list(history)
         seen["model"] = model
         seen["web_search"] = web_search
@@ -820,6 +821,148 @@ def test_chat_still_streams_after_stream_helper_extract(monkeypatch, tmp_path):
                                    "content": "second question"}
     assert memory.get_history(tid)[-1] == {"role": "assistant",
                                            "content": "hello back"}
+
+
+def test_thread_stop_requires_code_and_thread(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.post(f"/api/threads/{tid}/stop", json={})
+    assert r.status_code == 401
+    r = c.post(f"/api/threads/{tid}/stop",
+               json={"access_code": "wrong"})
+    assert r.status_code == 401
+    r = c.post("/api/threads/nope-not-real/stop",
+               json={"access_code": CODE})
+    assert r.status_code == 404
+
+
+def test_thread_stop_idle_thread_is_noop_not_error(monkeypatch, tmp_path):
+    # No turn in flight: stopping is an honest no-op, not a 404/409.
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.post(f"/api/threads/{tid}/stop", json={"access_code": CODE})
+    assert r.status_code == 200
+    assert r.json() == {"stopped": False, "running": False}
+
+
+def test_thread_stop_stops_running_turn(monkeypatch, tmp_path):
+    import asyncio
+    import threading
+    import time
+
+    from app import agent as agent_mod
+    from app import memory
+
+    c, tid = _thread_client(monkeypatch, tmp_path)
+
+    async def slow_turn(history, emit, model="", web_search=False,
+                        should_stop=None):
+        # A turn that only ends when told to: emit a partial reply, then
+        # poll the stop flag the way the real agent loop checks it.
+        await emit({"type": "text", "text": "partial answer"})
+        for _ in range(200):
+            if should_stop and should_stop():
+                await emit({"type": "stopped"})
+                return "partial answer\n[stopped by user]"
+            await asyncio.sleep(0.05)
+        return "partial answer"
+
+    monkeypatch.setattr(agent_mod, "run_turn", slow_turn)
+    result = {}
+
+    def _chat():
+        result["resp"] = c.post("/api/chat", json={
+            "message": "second question", "thread_id": tid,
+            "access_code": CODE})
+
+    t = threading.Thread(target=_chat, daemon=True)
+    t.start()
+    # Give the turn time to start streaming before stopping it.
+    for _ in range(100):
+        time.sleep(0.05)
+        probe = c.post(f"/api/threads/{tid}/stop",
+                       json={"access_code": CODE})
+        if probe.json().get("running"):
+            break
+    else:
+        raise AssertionError("turn never registered as running")
+    assert probe.status_code == 200
+    assert probe.json() == {"stopped": True, "running": True}
+    t.join(timeout=15)
+    assert not t.is_alive()
+    r = result["resp"]
+    assert r.status_code == 200
+    assert "partial answer" in r.text
+    assert '"stopped"' in r.text
+    # The stored reply is the partial answer with the marker — not a
+    # full reply, and not missing (the turn did run).
+    stored = memory.get_history(tid)
+    assert stored[-1] == {"role": "assistant",
+                          "content": "partial answer\n[stopped by user]"}
+    # The flag is dropped when the turn ends: a later stop is a no-op.
+    r = c.post(f"/api/threads/{tid}/stop", json={"access_code": CODE})
+    assert r.json() == {"stopped": False, "running": False}
+
+
+def test_run_turn_stop_before_first_model_call(monkeypatch):
+    # Stopping before anything runs must not call the model at all.
+    from app import agent as agent_mod
+    from app import models
+    from tests.conftest import run
+
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("model must not run on a stopped turn")
+
+    monkeypatch.setattr(models, "chat", _must_not_run)
+    seen = []
+
+    async def emit(ev):
+        seen.append(ev)
+
+    result = run(agent_mod.run_turn(
+        [{"role": "user", "content": "hi"}], emit,
+        should_stop=lambda: True))
+    assert result == "[stopped by user]"
+    assert {"type": "stopped"} in seen
+    assert seen[-1]["type"] == "done"
+
+
+def test_run_turn_stop_skips_remaining_tool_calls(monkeypatch):
+    # One tool call runs, then the stop lands: the second call never
+    # executes and the next model call never happens.
+    from app import agent as agent_mod
+    from app import models
+    from app import tools as T
+    from tests.conftest import run
+
+    calls = {"chat": 0, "tool": 0}
+    stop_after_first_tool = {"flag": False}
+
+    def _fake_chat(messages, max_tokens, temperature, tools,
+                   progress=None, preferred_model="", on_token=None):
+        calls["chat"] += 1
+        text = ('```tool_call\n{"name": "echo_tool", "arguments": {}}\n```'
+                if calls["chat"] == 1 else "second answer")
+        return text, "fake", [], None, False
+
+    def _echo_tool(**kwargs):
+        calls["tool"] += 1
+        stop_after_first_tool["flag"] = True
+        return "tool output"
+
+    monkeypatch.setattr(models, "chat", _fake_chat)
+    monkeypatch.setattr(T, "get_tool",
+                        lambda name: {"execute": _echo_tool})
+
+    seen = []
+
+    async def emit(ev):
+        seen.append(ev)
+
+    result = run(agent_mod.run_turn(
+        [{"role": "user", "content": "do two things"}], emit,
+        should_stop=lambda: stop_after_first_tool["flag"]))
+    assert calls == {"chat": 1, "tool": 1}
+    assert result == "[stopped by user]"
+    assert {"type": "stopped"} in seen
 
 
 def _edit_url(tid, mid):

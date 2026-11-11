@@ -98,11 +98,21 @@ def _synth_assistant_msg(clean: str, calls: list[dict]) -> dict:
 
 
 async def run_turn(history: list[dict], emit, model: str = "",
-               web_search: bool = False) -> str:
+               web_search: bool = False,
+               should_stop: object = None) -> str:
     """Run one agent turn. emit(event_dict) is called for SSE. Returns final text.
 
     model: preferred Horde model id from the UI picker ("" = auto-route).
     web_search: when True, the agent is told to ground answers with web_search.
+    should_stop: optional zero-arg callable the server sets when the user
+    hits Stop (or closes the tab mid-turn). It is checked before every
+    model call and before every tool call, so a stop lands at the next
+    boundary instead of letting the turn run to its 11-minute cap and
+    storing a reply nobody asked for. A model call already in flight
+    finishes first — a Horde queue wait cannot be interrupted from here.
+    A stopped turn emits {"type": "stopped"} and the stored reply carries
+    a "[stopped by user]" marker, so the transcript stays honest about
+    the partial answer instead of looking complete.
     """
     messages: list[dict] = [{"role": "system",
                              "content": SYSTEM_PROMPT + "\n\n" + TOOL_FORMAT_HINT}]
@@ -157,8 +167,15 @@ async def run_turn(history: list[dict], emit, model: str = "",
 
     final_text = ""
     source = "?"
+    stopped = False
+
+    def _stopped() -> bool:
+        return bool(should_stop) and bool(should_stop())
 
     for _ in range(MAX_ITERS):
+        if _stopped():
+            stopped = True
+            break
         text, source, native_calls, raw_msg, streamed = await asyncio.to_thread(
             models.chat, messages, 1200, 0.7, T.openai_tools(),
             progress=_progress, preferred_model=model, on_token=_on_token)
@@ -184,6 +201,9 @@ async def run_turn(history: list[dict], emit, model: str = "",
             break
 
         for call in calls:
+            if _stopped():
+                stopped = True
+                break
             name, args = call["name"], call.get("args") or {}
             tool = T.get_tool(name)
             await emit({"type": "tool", "name": name, "args": args})
@@ -222,9 +242,15 @@ async def run_turn(history: list[dict], emit, model: str = "",
                     if sres.get("ok"):
                         await emit({"type": "shot", "shot": sres["shot"],
                                     "caption": f"Preview: {args['path']}"})
+        if stopped:
+            break
         await emit({"type": "thinking", "text": "Thinking…"})
     else:
         final_text += "\n[stopped after max tool iterations]"
+
+    if stopped:
+        await emit({"type": "stopped"})
+        final_text += (("\n" if final_text else "") + "[stopped by user]")
 
     await emit({"type": "done", "model": source})
     return final_text.strip()

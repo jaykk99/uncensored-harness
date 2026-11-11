@@ -17,6 +17,7 @@ Endpoints:
   GET  /api/messages/search — search every thread's messages, jump to the turn
   POST /api/chat          — agent turn, SSE stream {message, thread_id, access_code}
   POST /api/threads/{id}/regenerate — redo the last turn, same prompt, new reply (SSE)
+  POST /api/threads/{id}/stop — stop the turn running on a thread, server-side
   POST /api/run           — code runner {language: python|javascript, code, access_code}
   POST /api/shell         — terminal {command, access_code}
   GET  /api/files         — list workdir files (access_code)
@@ -49,6 +50,14 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="uncensored-harness")
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
 
+# One stop flag per thread with a turn in flight. _stream_turn registers
+# the flag when the turn starts and drops it when the turn ends; the stop
+# endpoint (and a client disconnect) sets it, and the agent loop checks it
+# before every model and tool call. In-memory only: a server restart drops
+# in-flight flags, and with them any turn that was running — nothing is
+# persisted, so a stale flag can never stop a later turn.
+_stop_events: dict[str, asyncio.Event] = {}
+
 
 def _access_code() -> str:
     return os.environ.get("HARNESS_ACCESS_CODE", "").strip()
@@ -71,6 +80,10 @@ class ChatRequest(BaseModel):
 class RegenerateRequest(BaseModel):
     model: str = ""        # preferred Horde model id ("" = auto)
     web_search: bool = False
+    access_code: str = ""
+
+
+class StopRequest(BaseModel):
     access_code: str = ""
 
 
@@ -602,6 +615,8 @@ def _stream_turn(thread_id: str, history: list[dict], model: str = "",
         yield f"data: {json.dumps({'type': 'thread', 'thread_id': thread_id})}\n\n"
 
         queue: asyncio.Queue = asyncio.Queue()
+        stop_event = asyncio.Event()
+        _stop_events[thread_id] = stop_event
 
         async def run_agent():
             try:
@@ -615,7 +630,8 @@ def _stream_turn(thread_id: str, history: list[dict], model: str = "",
                     text = await asyncio.wait_for(
                         agent_mod.run_turn(history, collect,
                                            model=model,
-                                           web_search=web_search),
+                                           web_search=web_search,
+                                           should_stop=stop_event.is_set),
                         timeout=660)
                 except asyncio.TimeoutError:
                     err = ("Timed out after 11 minutes with no answer. "
@@ -659,9 +675,19 @@ def _stream_turn(thread_id: str, history: list[dict], model: str = "",
                     break
                 yield chunk
         finally:
+            # A disconnect lands here too (client closed the tab, hit
+            # Stop, network dropped). Flag the turn so the agent stops
+            # at its next boundary instead of running the full turn and
+            # storing a reply nobody is reading. Setting it after a
+            # normal finish is a no-op: the flag is dropped below.
+            stop_event.set()
             stop_ping.set()
             ping_task.cancel()
         await task
+        # Only drop our own flag: two tabs can run turns on one thread,
+        # and the second turn's flag must survive the first turn ending.
+        if _stop_events.get(thread_id) is stop_event:
+            _stop_events.pop(thread_id, None)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
 
@@ -729,6 +755,32 @@ async def thread_regenerate(thread_id: str, req: RegenerateRequest):
     history = memory.get_history(thread_id)
     return _stream_turn(thread_id, history, model=req.model or "",
                         web_search=req.web_search)
+
+
+@app.post("/api/threads/{thread_id}/stop")
+def thread_stop(thread_id: str, req: StopRequest):
+    """Stop the turn currently running on this thread, server-side.
+
+    Before this endpoint the UI Stop button only aborted the browser's
+    fetch: the server turn kept running to its 11-minute cap and stored
+    the full reply as if the user had never stopped it. This sets the
+    turn's stop flag, so the agent loop exits at its next model/tool
+    boundary, emits {"type": "stopped"}, and stores the partial reply
+    with a "[stopped by user]" marker.
+
+    Returns {"stopped": true, "running": true} when a turn was in
+    flight, {"stopped": false, "running": false} when the thread is
+    idle — stopping an idle thread is a no-op, not an error. Auth is
+    checked before the thread lookup, like the other thread routes.
+    """
+    _check_access(req.access_code)
+    if not memory.thread_exists(thread_id):
+        raise HTTPException(status_code=404, detail="no such thread")
+    event = _stop_events.get(thread_id)
+    if event is None:
+        return {"stopped": False, "running": False}
+    event.set()
+    return {"stopped": True, "running": True}
 
 
 @app.post("/api/run")

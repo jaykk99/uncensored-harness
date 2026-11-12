@@ -66,6 +66,19 @@ def test_list_threads_newest_first_and_capped(memdb):
     assert threads[-1]["id"] == ids[5]
 
 
+def test_list_all_threads_has_no_cap_and_includes_archived(memdb):
+    # A backup built on list_threads() would silently drop the oldest
+    # threads past the 50 cap, and the archived ones too.
+    ids = [memdb.create_thread(f"t-{i}") for i in range(55)]
+    memdb.set_thread_archived(ids[0], True)
+    all_threads = memdb.list_all_threads()
+    assert len(all_threads) == 55
+    assert {t["id"] for t in all_threads} == set(ids)
+    assert all_threads[0]["id"] == ids[-1]
+    assert memdb.list_all_threads(include_archived=False) == [
+        t for t in all_threads if not t["archived"]]
+
+
 def test_list_threads_shape(memdb):
     tid = memdb.create_thread("shape")
     (row,) = [t for t in memdb.list_threads() if t["id"] == tid]

@@ -351,6 +351,102 @@ def test_thread_import_requires_code_and_validates_payload(monkeypatch, tmp_path
     assert len(after) == len(before) + 1
 
 
+def test_threads_export_all_json_covers_every_thread(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    other = memory.create_thread("second chat")
+    memory.add_message(other, "user", "hello there")
+    archived = memory.create_thread("old archived chat")
+    memory.add_message(archived, "user", "archived words")
+    memory.set_thread_archived(archived, True)
+    r = c.get("/api/threads/export-all")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/export-all?access_code=wrong")
+    assert r.status_code == 401
+    r = c.get(f"/api/threads/export-all?format=txt&access_code={CODE}")
+    assert r.status_code == 400
+    r = c.get(f"/api/threads/export-all?format=json&access_code={CODE}")
+    assert r.status_code == 200
+    assert "harness-backup-" in r.headers["content-disposition"]
+    body = r.json()
+    # Archived threads are in the backup too: a backup that skips
+    # them is not a backup.
+    assert body["total_threads"] == 3
+    assert body["total_messages"] == 4
+    titles = [e["thread"]["title"] for e in body["threads"]]
+    assert titles == ["old archived chat", "second chat", "reopen me"]
+    by_title = {e["thread"]["title"]: e["messages"] for e in body["threads"]}
+    assert [(m["role"], m["content"]) for m in by_title["reopen me"]] == [
+        ("user", "first question"), ("assistant", "first answer")]
+    assert by_title["old archived chat"][0]["content"] == "archived words"
+
+
+def test_threads_export_all_past_the_50_cap(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(54):
+        memory.create_thread(f"bulk-{i}")
+    body = c.get(f"/api/threads/export-all?access_code={CODE}").json()
+    assert body["total_threads"] == 55
+    assert len(body["threads"]) == 55
+
+
+def test_threads_export_all_markdown(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/threads/export-all?format=md&access_code={CODE}")
+    assert r.status_code == 200
+    assert "harness-backup-" in r.headers["content-disposition"]
+    assert "# reopen me" in r.text
+    assert "first question" in r.text
+    assert "first answer" in r.text
+
+
+def test_thread_import_bundle_roundtrips_export_all(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    other = memory.create_thread("second chat")
+    memory.add_message(other, "user", "hello there")
+    exported = c.get(f"/api/threads/export-all?access_code={CODE}")
+    assert exported.status_code == 200
+    payload = exported.json()
+    payload["access_code"] = CODE
+    r = c.post("/api/threads/import", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["imported"] is True
+    assert body["threads"] == 2
+    assert body["messages"] == 3
+    assert len(body["thread_ids"]) == 2
+    titles = [t["title"] for t in
+              c.get(f"/api/threads?access_code={CODE}").json()["threads"]]
+    assert titles.count("reopen me") == 2
+    assert titles.count("second chat") == 2
+    # Export-all lists newest first, so thread_ids[1] is the restored
+    # "reopen me" (thread_ids[0] is "second chat").
+    restored = c.get(
+        f"/api/threads/{body['thread_ids'][1]}?access_code={CODE}").json()
+    assert [(m["role"], m["content"]) for m in restored["messages"]] == [
+        ("user", "first question"), ("assistant", "first answer")]
+
+
+def test_thread_import_bundle_validates_everything_first(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    good = {"thread": {"title": "ok"},
+            "messages": [{"role": "user", "content": "hi"}]}
+    bad = {"thread": {"title": "bad"},
+           "messages": [{"role": "user", "content": 42}]}
+    before = c.get(f"/api/threads?access_code={CODE}").json()["threads"]
+    r = c.post("/api/threads/import",
+               json={"threads": "not a list", "access_code": CODE})
+    assert r.status_code == 400
+    # One bad entry: nothing is imported, not even the good entry.
+    r = c.post("/api/threads/import",
+               json={"threads": [good, bad], "access_code": CODE})
+    assert r.status_code == 400
+    after = c.get(f"/api/threads?access_code={CODE}").json()["threads"]
+    assert len(after) == len(before)
+
+
 def test_thread_pin_toggles_sets_and_sorts_first(monkeypatch, tmp_path):
     from app import memory
     c, tid = _thread_client(monkeypatch, tmp_path)

@@ -115,6 +115,8 @@
   #archivedtoggle:hover { color: var(--text); }
   #importbtn { margin: 0 12px 8px; padding: 6px 10px; background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--dim); cursor: pointer; font-size: 12px; text-align: left; }
   #importbtn:hover { color: var(--text); }
+  #exportallbtn { margin: 0 12px 8px; padding: 6px 10px; background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--dim); cursor: pointer; font-size: 12px; text-align: left; }
+  #exportallbtn:hover { color: var(--text); }
     color: var(--text); border: 1px solid var(--border); border-radius: 9px; font-size: 13px; }
   .thread .tsnip { font-size: 12px; color: var(--dim); overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
@@ -494,6 +496,7 @@
     <input id="threadsearch" type="text" placeholder="Search chats..." autocomplete="off">
     <button id="archivedtoggle">Show archived</button>
     <button id="importbtn">Import chat (.json)</button>
+    <button id="exportallbtn">Export all chats (.json)</button>
     <input id="importfile" type="file" accept=".json,application/json" hidden>
     <div id="threads"></div>
     <div id="sidefoot">
@@ -1873,9 +1876,22 @@ $("archivedtoggle").onclick = () => {
   resetMsgHits();
   loadThreads();
 };
+/* Export all: one download with every thread (archived included), the
+   JSON bundle the import endpoint restores in one upload. Per-thread
+   export already existed; a full backup used to mean clicking export
+   on every thread, and the sidebar's 50 cap would have dropped the
+   older ones anyway. */
+$("exportallbtn").onclick = () => {
+  const a = document.createElement("a");
+  a.href = "/api/threads/export-all?format=json&access_code=" +
+    encodeURIComponent(AC);
+  document.body.appendChild(a); a.click(); a.remove();
+};
 /* Import: the round-trip for export. An exported .json restores as a
    new thread (fresh id, unpinned, unarchived) and opens immediately,
-   so a deleted thread or a move to a fresh deploy is recoverable. */
+   so a deleted thread or a move to a fresh deploy is recoverable.
+   A backup bundle ({"threads": [...]}) restores every thread in it
+   and opens the first one. */
 $("importbtn").onclick = () => $("importfile").click();
 $("importfile").onchange = async e => {
   const file = e.target.files[0];
@@ -1883,15 +1899,18 @@ $("importfile").onchange = async e => {
   if (!file) return;
   try {
     const payload = JSON.parse(await file.text());
+    const body = { access_code: AC };
+    if (Array.isArray(payload.threads)) body.threads = payload.threads;
+    else { body.thread = payload.thread || {}; body.messages = payload.messages || []; }
     const rr = await fetch("/api/threads/import", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thread: payload.thread || {},
-        messages: payload.messages || [], access_code: AC }) });
+      body: JSON.stringify(body) });
     if (!rr.ok) throw new Error((await rr.json()).detail || "import failed");
     const d = await rr.json();
     loadThreads();
     if (d.thread && d.thread.id) openThread(d.thread.id);
-    toast("Chat imported.");
+    else if (d.thread_ids && d.thread_ids.length) openThread(d.thread_ids[0]);
+    toast(d.threads ? d.threads + " chats imported." : "Chat imported.");
   } catch (err) { toast("Import failed: " + err.message, true); }
 };
 function renderThreads(list) {

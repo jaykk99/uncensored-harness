@@ -480,6 +480,26 @@ def list_threads(include_archived: bool = False) -> list[dict]:
              "pinned": bool(r[3]), "archived": bool(r[4])} for r in rows]
 
 
+def list_all_threads(include_archived: bool = True) -> list[dict]:
+    """Every thread, same ordering as list_threads, with no 50 cap.
+
+    list_threads() caps at 50 because that is what the sidebar shows,
+    but a full backup built on it would silently drop every older
+    chat. Export-all reads from here instead, so a backup is actually
+    complete: archived threads included by default, since a backup
+    that skips them is not a backup.
+    """
+    c = _conn()
+    where = "" if include_archived else "WHERE archived=0 "
+    rows = c.execute(
+        "SELECT id, title, created, pinned, archived FROM threads "
+        + where +
+        "ORDER BY pinned DESC, created DESC").fetchall()
+    c.close()
+    return [{"id": r[0], "title": r[1], "created": r[2],
+             "pinned": bool(r[3]), "archived": bool(r[4])} for r in rows]
+
+
 def list_archived_threads() -> list[dict]:
     """Archived threads only, newest first, for the archive view."""
     c = _conn()

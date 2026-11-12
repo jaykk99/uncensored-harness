@@ -5,7 +5,9 @@ Endpoints:
   GET  /api/health        — liveness + model routing + self-test summary
   GET  /api/self-test     — refusal-probe verification (access_code)
   GET  /api/threads       — list threads (access_code, archived=true for the archive view)
-  POST /api/threads/import — restore a thread from an exported JSON file
+  POST /api/threads/import — restore a thread from an exported JSON file,
+    or a whole export-all bundle ({"threads": [...]})
+  GET  /api/threads/export-all — download every thread at once, md or json
   GET  /api/threads/{id}/export — download a whole thread, md or json
   POST /api/threads/{id}/duplicate — fork a thread with all its messages
   POST /api/threads/{id}/pin — pin/unpin a thread (pinned sort first)
@@ -123,9 +125,12 @@ class ThreadImportRequest(BaseModel):
     # never reused (see memory.import_thread). thread/messages are
     # deliberately untyped here so the endpoint itself can 400 on every
     # malformed shape, instead of pydantic 422ing some and the handler
-    # 400ing others.
+    # 400ing others. `threads` is the export-all bundle shape:
+    # {"threads": [{"thread": {...}, "messages": [...]}, ...]} — same
+    # per-entry shape, restored as one new thread each.
     thread: object = {}
     messages: object = []
+    threads: object = None
     access_code: str = ""
 
 
@@ -215,7 +220,7 @@ def thread_search(q: str = "", access_code: str = ""):
 
 @app.post("/api/threads/import")
 def thread_import(req: ThreadImportRequest):
-    """Restore a thread from an exported JSON file.
+    """Restore a thread from an exported JSON file, or a whole backup.
 
     Registered before /api/threads/{thread_id} so "import" is never
     treated as a thread id. Auth is checked before any validation, same
@@ -224,8 +229,41 @@ def thread_import(req: ThreadImportRequest):
     importing a half-parsed thread: messages must be a list of objects
     with string role and content. Title falls back to "untitled" when
     the export carries none; the 60-char cap comes from create_thread.
+    A bundle ({"threads": [...]}, what export-all emits) restores every
+    entry as its own new thread. The whole bundle is validated first,
+    so one bad entry imports nothing instead of leaving a half-restored
+    backup behind.
     """
     _check_access(req.access_code)
+    if req.threads is not None:
+        if not isinstance(req.threads, list):
+            raise HTTPException(status_code=400,
+                                detail="threads must be a list")
+        entries = []
+        for entry in req.threads:
+            if (not isinstance(entry, dict)
+                    or not isinstance(entry.get("messages"), list)):
+                raise HTTPException(
+                    status_code=400,
+                    detail="each thread needs a messages list")
+            for m in entry["messages"]:
+                if (not isinstance(m, dict)
+                        or not isinstance(m.get("role"), str)
+                        or not isinstance(m.get("content"), str)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="each message needs a string role and content")
+            thread = entry.get("thread") if isinstance(entry.get("thread"), dict) else {}
+            title = thread.get("title")
+            title = title.strip() if isinstance(title, str) else ""
+            entries.append((title or "untitled", entry["messages"]))
+        new_ids = []
+        total_messages = 0
+        for title, messages in entries:
+            new_ids.append(memory.import_thread(title, messages))
+            total_messages += len(messages)
+        return {"imported": True, "threads": len(new_ids),
+                "messages": total_messages, "thread_ids": new_ids}
     if not isinstance(req.messages, list):
         raise HTTPException(status_code=400, detail="messages must be a list")
     for m in req.messages:
@@ -240,6 +278,47 @@ def thread_import(req: ThreadImportRequest):
     new_id = memory.import_thread(title or "untitled", req.messages)
     return {"imported": True, "thread": memory.get_thread(new_id),
             "messages": len(req.messages)}
+
+
+@app.get("/api/threads/export-all")
+def threads_export_all(format: str = "json", access_code: str = ""):
+    """Download every thread at once: a full backup, md or json.
+
+    Per-thread export already existed, but backing up meant clicking
+    export on every thread one at a time, and the sidebar list caps at
+    50 — a backup built from it would silently drop older chats. This
+    reads list_all_threads() (no cap, archived included) and carries
+    every message of every thread. The JSON shape is the bundle the
+    import endpoint accepts, so a backup restores in one upload.
+    Registered before /api/threads/{thread_id} so "export-all" is never
+    treated as a thread id. Auth is checked before the query, same as
+    the other thread endpoints.
+    """
+    _check_access(access_code)
+    fmt = (format or "json").lower()
+    if fmt not in ("md", "json"):
+        raise HTTPException(status_code=400, detail="format must be md or json")
+    stamp = datetime.date.today().isoformat()
+    bundle = []
+    total_messages = 0
+    for thread in memory.list_all_threads():
+        messages = memory.get_all_messages(thread["id"])
+        total_messages += len(messages)
+        bundle.append({"thread": thread, "messages": messages})
+    if fmt == "json":
+        body = json.dumps({"threads": bundle,
+                           "total_threads": len(bundle),
+                           "total_messages": total_messages}, indent=2)
+        return Response(content=body, media_type="application/json",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="harness-backup-{stamp}.json"'})
+    parts = []
+    for entry in bundle:
+        parts.append(_thread_markdown(entry["thread"], entry["messages"]))
+    return Response(content="\n---\n\n".join(parts),
+                    media_type="text/markdown",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="harness-backup-{stamp}.md"'})
 
 
 @app.get("/api/threads/{thread_id}")

@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>uncensored-harness NN — guard-boundary triage scorer</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3;
+          --muted:#8b949e; --green:#3fb950; --red:#f85149; --amber:#d29922;
+          --blue:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:20px 24px 8px; }
+  h1 { margin:0 0 4px; font-size:22px; }
+  h2 { font-size:16px; margin:0 0 10px; }
+  .sub { color:var(--muted); font-size:13px; }
+  main { padding:12px 24px 40px; display:grid; gap:16px;
+         grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); }
+  .card { background:var(--panel); border:1px solid var(--line);
+          border-radius:8px; padding:16px; }
+  .wide { grid-column:1 / -1; }
+  .warn { background:#3a2b00; border:1px solid var(--amber); color:#ffd479;
+          border-radius:8px; padding:12px 16px; font-size:13px; }
+  .metrics { display:flex; flex-wrap:wrap; gap:12px; }
+  .metric { flex:1 1 120px; background:#0d1117; border:1px solid var(--line);
+            border-radius:6px; padding:10px; }
+  .metric .v { font-size:22px; font-weight:700; }
+  .metric .k { color:var(--muted); font-size:12px; margin-top:2px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; }
+  th { color:var(--muted); font-weight:600; }
+  .bar-row { display:grid; grid-template-columns:170px 1fr 56px; gap:8px;
+             align-items:center; font-size:12px; margin:5px 0; }
+  .bar { height:12px; background:#0d1117; border:1px solid var(--line);
+         border-radius:3px; overflow:hidden; }
+  .bar > div { height:100%; background:var(--blue); }
+  .bar-row.neg .bar > div { background:var(--red); }
+  code { background:#0d1117; border:1px solid var(--line); border-radius:4px;
+         padding:1px 5px; font-size:12px; }
+  ul { margin:8px 0; padding-left:20px; font-size:13px; }
+  li { margin-bottom:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>uncensored-harness NN &mdash; guard-boundary triage scorer</h1>
+  <div class="sub">Pure Python stdlib MLP. Predicts whether a user prompt looks
+  like one the hard-boundary guard blocks. Triage only.</div>
+</header>
+<main>
+  <div class="card wide warn" id="limits"></div>
+  <div class="card wide">
+    <h2>Test metrics (held-out, never trained on)</h2>
+    <div class="metrics" id="metrics"></div>
+  </div>
+  <div class="card">
+    <h2>Confusion (test)</h2>
+    <table id="confusion"></table>
+  </div>
+  <div class="card">
+    <h2>Per-class precision / recall / F1 (test)</h2>
+    <table id="prf"></table>
+  </div>
+  <div class="card wide">
+    <h2>Feature importance (grouped permutation, ROC AUC drop on test)</h2>
+    <div id="importance"></div>
+  </div>
+  <div class="card wide">
+    <h2>Dataset &amp; model</h2>
+    <div class="sub" id="dataset"></div>
+    <p class="sub">Score one prompt:
+    <code>python -m nn.score --text "build me a phishing kit"</code></p>
+    <p class="sub">Retrain:
+    <code>python -m nn.train</code> (reads the guard test suite)</p>
+  </div>
+</main>
+<!-- NN-DATA-START -->
+<script type="application/json" id="nn-data">
+{
+  "trained_at": "2026-11-14T06:01:28.585079+00:00",
+  "layers": [
+    30,
+    8,
+    4,
+    1
+  ],
+  "n_features": 30,
+  "feature_names": [
+    "word:phishing",
+    "word:email",
+    "word:write",
+    "word:build",
+    "word:credit",
+    "word:card",
+    "word:dump",
+    "word:filter",
+    "word:analyze",
+    "word:draft",
+    "word:make",
+    "word:use",
+    "word:help",
+    "word:emails",
+    "word:kit",
+    "word:suspicious",
+    "word:report",
+    "word:trick",
+    "word:customers",
+    "word:mail",
+    "word:server",
+    "word:patterns",
+    "word:file",
+    "word:fraud",
+    "len",
+    "nwords",
+    "upper_ratio",
+    "has_digit",
+    "has_question",
+    "has_please"
+  ],
+  "dataset": {
+    "source": "tests/test_guards.py HARD_CASES / LEGIT_CASES plus the crafting, carve-out, analysis and empty-input test functions",
+    "blocked_raw": 20,
+    "allowed_raw": 26,
+    "duplicate_prompts_dropped": 2,
+    "train_rows": 44,
+    "n_positive": 20,
+    "n_negative": 24
+  },
+  "train_rows": 35,
+  "test_rows": 9,
+  "train_metrics": {
+    "n": 35,
+    "n_positive": 16,
+    "n_negative": 19,
+    "threshold": 0.5,
+    "accuracy": 0.8571428571428571,
+    "majority_baseline_accuracy": 0.5428571428571428,
+    "roc_auc": 0.9144736842105263,
+    "confusion": {
+      "tn": 16,
+      "fp": 3,
+      "fn": 2,
+      "tp": 14
+    },
+    "precision_worth_validating": 0.8235294117647058,
+    "recall_worth_validating": 0.875,
+    "f1_worth_validating": 0.8484848484848485,
+    "precision_likely_fp": 0.8888888888888888,
+    "recall_likely_fp": 0.8421052631578947,
+    "f1_likely_fp": 0.8648648648648649
+  },
+  "test_metrics": {
+    "n": 9,
+    "n_positive": 4,
+    "n_negative": 5,
+    "threshold": 0.5,
+    "accuracy": 0.6666666666666666,
+    "majority_baseline_accuracy": 0.5555555555555556,
+    "roc_auc": 0.55,
+    "confusion": {
+      "tn": 4,
+      "fp": 1,
+      "fn": 2,
+      "tp": 2
+    },
+    "precision_worth_validating": 0.6666666666666666,
+    "recall_worth_validating": 0.5,
+    "f1_worth_validating": 0.5714285714285715,
+    "precision_likely_fp": 0.6666666666666666,
+    "recall_likely_fp": 0.8,
+    "f1_likely_fp": 0.7272727272727272
+  },
+  "history": {
+    "loss": [
+      0.7406137450842559,
+      0.7369983311656755,
+      0.7307525954799304,
+      0.7171923985125344,
+      0.7119633635919884,
+      0.7088817740284598,
+      0.7007556770508072,
+      0.6946606065091752,
+      0.6857743920942989,
+      0.6768298230491036,
+      0.6716128919642615,
+      0.6670659568076639,
+      0.6623321002774948,
+      0.6583928669837634,
+      0.6557254338797135,
+      0.6427169349887751,
+      0.6350908730863682,
+      0.6337011450612651,
+      0.6281165144868662,
+      0.6243156428024857,
+      0.6212683678728846,
+      0.6158156475214859,
+      0.6141349906457542,
+      0.609978822509221,
+      0.6077278358044627,
+      0.6039256057166106,
+      0.6017880950238811,
+      0.5984351884899369,
+      0.594770580117223,
+      0.5900961230907148,
+      0.5862481874282542,
+      0.5838854991608411,
+      0.5767465044876103,
+      0.5715883263316264,
+      0.5716899983908671,
+      0.5739213428569965,
+      0.5681998962533642,
+      0.5594992412744623,
+      0.5529391919415483,
+      0.5497562544408788,
+      0.5468381634026233,
+      0.546436079721095,
+      0.5437196221648726,
+      0.5398325057165609,
+      0.5385406700970817,
+      0.5368885886186846,
+      0.5323117407404134,
+      0.5278313400320946,
+      0.5246717542519381,
+      0.5207660963074352,
+      0.5203422309271303,
+      0.511391205569978,
+      0.5080713277838902,
+      0.505301666984819,
+      0.5029259608179523,
+      0.5024337181858818,
+      0.5027485095088742,
+      0.4930415422980611,
+      0.48742827413478895,
+      0.48406491077646835
+    ],
+    "train_acc": [
+      0.45714285714285713,
+      0.5428571428571428,
+      0.5428571428571428,
+      0.5714285714285714,
+      0.5142857142857142,
+      0.4857142857142857,
+      0.4857142857142857,
+      0.5142857142857142,
+      0.5714285714285714,
+      0.6285714285714286,
+      0.6285714285714286,
+      0.5714285714285714,
+      0.6571428571428571,
+      0.6285714285714286,
+      0.6571428571428571,
+      0.6857142857142857,
+      0.6857142857142857,
+      0.6571428571428571,
+      0.7428571428571429,
+      0.7428571428571429,
+      0.6857142857142857,
+      0.7142857142857143,
+      0.7142857142857143,
+      0.7428571428571429,
+      0.7142857142857143,
+      0.7142857142857143,
+      0.7428571428571429,
+      0.7428571428571429,
+      0.7428571428571429,
+      0.7428571428571429,
+      0.7714285714285715,
+      0.7428571428571429,
+      0.7714285714285715,
+      0.7714285714285715,
+      0.7714285714285715,
+      0.7714285714285715,
+      0.7714285714285715,
+      0.8,
+      0.8,
+      0.8,
+      0.8,
+      0.8,
+      0.8,
+      0.7714285714285715,
+      0.8,
+      0.8,
+      0.7714285714285715,
+      0.8,
+      0.8,
+      0.8285714285714286,
+      0.8,
+      0.8285714285714286,
+      0.7714285714285715,
+      0.8571428571428571,
+      0.8,
+      0.8,
+      0.8571428571428571,
+      0.8285714285714286,
+      0.8285714285714286,
+      0.8571428571428571
+    ],
+    "val_acc": [
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.8888888888888888,
+      0.7777777777777778,
+      0.7777777777777778,
+      0.7777777777777778,
+      0.7777777777777778,
+      0.7777777777777778,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.5555555555555556,
+      0.5555555555555556,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.7777777777777778,
+      0.5555555555555556,
+      0.5555555555555556,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.5555555555555556,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.7777777777777778,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.5555555555555556,
+      0.5555555555555556,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.6666666666666666,
+      0.5555555555555556,
+      0.5555555555555556,
+      0.4444444444444444,
+      0.5555555555555556,
+      0.6666666666666666,
+      0.6666666666666666
+    ]
+  },
+  "feature_importance": [
+    {
+      "group": "words",
+      "auc_drop": 0.25
+    },
+    {
+      "group": "shape",
+      "auc_drop": 0.05
+    }
+  ],
+  "limits": [
+    "Triage only. The model ranks prompts by how much they look like past prompts the hard-boundary guard blocked. It does not verify anything.",
+    "The guard (app.guards.check_hard_boundary) stays the only gate. A low score never means a prompt is safe, and this model must never be used to bypass, weaken, or replace the guard.",
+    "TINY DATASET: only 44 labeled prompts exist (20 blocked / 24 allowed, 45% blocked). The held-out test set is 9 prompts, so each test prompt moves accuracy by ~11 points. Judge this model by whether it separates the classes at all, not by the exact test percentage.",
+    "Prompts using words unseen in training fall outside the vocab; the model has no opinion about them beyond the generic shape features."
+  ],
+  "seed": 42,
+  "epochs": 60,
+  "lr": 0.05
+}
+</script>
+<!-- NN-DATA-END -->
+<script>
+const d = JSON.parse(document.getElementById("nn-data").textContent || "{}");
+const tm = d.test_metrics || {}, tr = d.train_metrics || {};
+const fmt = (v) => (v == null ? "n/a" : (+v).toFixed(3));
+document.getElementById("limits").innerHTML =
+  "<b>Triage only.</b><ul>" + (d.limits || []).map((l) => "<li>" + l + "</li>").join("") + "</ul>";
+const mets = [
+  ["Test accuracy", fmt(tm.accuracy)],
+  ["Train accuracy", fmt(tr.accuracy)],
+  ["Majority baseline (test)", fmt(tm.majority_baseline_accuracy)],
+  ["Test ROC AUC", fmt(tm.roc_auc)],
+  ["Test rows", d.test_rows], ["Train rows", d.train_rows],
+  ["Features", d.n_features], ["Layers", (d.layers || []).join("-")],
+];
+document.getElementById("metrics").innerHTML = mets.map(([k, v]) =>
+  `<div class="metric"><div class="v">${v}</div><div class="k">${k}</div></div>`).join("");
+const cm = tm.confusion || {};
+document.getElementById("confusion").innerHTML =
+  `<tr><th></th><th>Predicted blocked</th><th>Predicted allowed</th></tr>
+   <tr><td>Actually blocked</td><td>${cm.tp ?? "-"}</td><td>${cm.fn ?? "-"}</td></tr>
+   <tr><td>Actually allowed</td><td>${cm.fp ?? "-"}</td><td>${cm.tn ?? "-"}</td></tr>`;
+document.getElementById("prf").innerHTML =
+  `<tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
+   <tr><td>blocked</td><td>${fmt(tm.precision_worth_validating)}</td><td>${fmt(tm.recall_worth_validating)}</td><td>${fmt(tm.f1_worth_validating)}</td></tr>
+   <tr><td>allowed</td><td>${fmt(tm.precision_likely_fp)}</td><td>${fmt(tm.recall_likely_fp)}</td><td>${fmt(tm.f1_likely_fp)}</td></tr>`;
+const imp = d.feature_importance || [];
+const maxDrop = Math.max(0.001, ...imp.map((x) => Math.abs(x.auc_drop)));
+document.getElementById("importance").innerHTML = imp.map((x) => {
+  const pct = Math.abs(x.auc_drop) / maxDrop * 100;
+  const cls = x.auc_drop < 0 ? "bar-row neg" : "bar-row";
+  return `<div class="${cls}"><span>${x.group}</span><div class="bar"><div style="width:${pct.toFixed(1)}%"></div></div><span>${x.auc_drop.toFixed(3)}</span></div>`;
+}).join("");
+const ds = d.dataset || {};
+document.getElementById("dataset").innerHTML =
+  `Source: ${ds.source || "n/a"}<br>Rows: ${ds.train_rows} total ` +
+  `(${ds.n_positive} blocked / ${ds.n_negative} allowed), ` +
+  `${ds.blocked_raw} blocked + ${ds.allowed_raw} allowed raw, ` +
+  `${ds.duplicate_prompts_dropped} duplicate prompts dropped.<br>` +
+  `Trained at: ${d.trained_at || "n/a"} &middot; seed ${d.seed} &middot; epochs ${d.epochs} &middot; lr ${d.lr}`;
+</script>
+</body>
+</html>

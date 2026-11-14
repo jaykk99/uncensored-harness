@@ -1,0 +1,37 @@
+name: nn-100h trainer
+
+# Runs the 100-hour guard-triage trainer (nn-100h/train.py) in chunks.
+# Manual dispatch only; results are uploaded as artifacts, never
+# auto-committed. Local runs use the same checkout and command.
+on:
+  workflow_dispatch:
+    inputs:
+      max_run_hours:
+        description: "Wall-clock budget for this chunk (hours)"
+        required: false
+        default: "5.5"
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Train one chunk
+        run: |
+          cd nn-100h
+          python3 train.py --resume --max-run-hours "${{ inputs.max_run_hours }}"
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: nn-100h-${{ github.run_id }}
+          path: |
+            nn-100h/experiments.jsonl
+            nn-100h/best.json
+            nn-100h/best-metrics.json
+            nn-100h/status.json
+            nn-100h/heartbeat.json
+          if-no-files-found: error

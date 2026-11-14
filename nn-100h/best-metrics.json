@@ -1,0 +1,77 @@
+{
+  "exp_id": "c0000-e0007",
+  "config": {
+    "hidden": [
+      16,
+      8
+    ],
+    "lr": 0.01,
+    "l2": 0.001,
+    "epochs": 60,
+    "seed": 0
+  },
+  "test": {
+    "n": 10,
+    "accuracy": 0.4,
+    "majority_baseline_accuracy": 0.5,
+    "roc_auc": 0.44,
+    "confusion": {
+      "tp": 0,
+      "fp": 1,
+      "tn": 4,
+      "fn": 5
+    },
+    "per_class_recall": {
+      "blocked": 0.0,
+      "allowed": 0.8
+    }
+  },
+  "train": {
+    "n": 43,
+    "accuracy": 0.6511627906976745,
+    "majority_baseline_accuracy": 0.5813953488372093,
+    "roc_auc": 0.6866666666666666,
+    "confusion": {
+      "tp": 5,
+      "fp": 2,
+      "tn": 23,
+      "fn": 13
+    },
+    "per_class_recall": {
+      "blocked": 0.2777777777777778,
+      "allowed": 0.92
+    }
+  },
+  "feature_vocab": [
+    "phishing",
+    "email",
+    "write",
+    "build",
+    "filter",
+    "draft",
+    "mail",
+    "own",
+    "list",
+    "page",
+    "kit",
+    "give",
+    "stolen",
+    "help",
+    "company",
+    "training",
+    "credit",
+    "card",
+    "paragraph",
+    "some",
+    "swearing",
+    "mondays",
+    "one",
+    "mild"
+  ],
+  "layers": [
+    30,
+    16,
+    8,
+    1
+  ]
+}

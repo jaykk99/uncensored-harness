@@ -16,7 +16,8 @@ def _conn():
     c.execute("""CREATE TABLE IF NOT EXISTS threads
                  (id TEXT PRIMARY KEY, title TEXT, created REAL,
                   pinned INTEGER NOT NULL DEFAULT 0,
-                  archived INTEGER NOT NULL DEFAULT 0)""")
+                  archived INTEGER NOT NULL DEFAULT 0,
+                  instructions TEXT NOT NULL DEFAULT '')""")
     # Older DBs were created before the pinned/archived columns existed:
     # add them in place so a pinned or archived thread survives a deploy,
     # instead of wiping the thread table or crashing every query that
@@ -26,6 +27,8 @@ def _conn():
         c.execute("ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
     if "archived" not in cols:
         c.execute("ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+    if "instructions" not in cols:
+        c.execute("ALTER TABLE threads ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
     c.execute("""CREATE TABLE IF NOT EXISTS messages
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT,
                   role TEXT, content TEXT, created REAL)""")
@@ -356,12 +359,13 @@ def message_position(tid: str, mid: int) -> dict | None:
 def get_thread(tid: str) -> dict | None:
     c = _conn()
     row = c.execute(
-        "SELECT id, title, created, pinned, archived FROM threads WHERE id=?", (tid,)).fetchone()
+        "SELECT id, title, created, pinned, archived, instructions FROM threads WHERE id=?", (tid,)).fetchone()
     c.close()
     if not row:
         return None
     return {"id": row[0], "title": row[1], "created": row[2],
-            "pinned": bool(row[3]), "archived": bool(row[4])}
+            "pinned": bool(row[3]), "archived": bool(row[4]),
+            "instructions": row[5] or ""}
 
 
 def delete_thread(tid: str) -> bool:
@@ -411,12 +415,15 @@ def duplicate_thread(tid: str) -> str | None:
     suffix = " (copy)"
     base = (src["title"] or "untitled")[:60 - len(suffix)]
     new_id = create_thread(f"{base}{suffix}")
+    if src.get("instructions"):
+        set_thread_instructions(new_id, src["instructions"])
     for m in get_all_messages(tid):
         add_message(new_id, m["role"], m["content"])
     return new_id
 
 
-def import_thread(title: str, messages: list[dict]) -> str:
+def import_thread(title: str, messages: list[dict],
+                  instructions: str = "") -> str:
     """Create a new thread from an exported thread's messages, in order.
 
     Export has existed since the sidebar gained per-thread actions, but
@@ -426,13 +433,34 @@ def import_thread(title: str, messages: list[dict]) -> str:
     (the export's id is never reused, so importing twice cannot collide
     with the original) and starts unpinned and unarchived, like a
     duplicate, even if the exported thread was pinned or archived.
-    Callers must validate message shape first; entries here are trusted
-    to carry string role/content.
+    Instructions do carry over: they are part of how the thread was
+    meant to behave, not a sidebar state. Callers must validate message
+    shape first; entries here are trusted to carry string role/content.
     """
     new_id = create_thread(title or "untitled")
+    if instructions:
+        set_thread_instructions(new_id, instructions)
     for m in messages:
         add_message(new_id, m["role"], m["content"])
     return new_id
+
+
+def set_thread_instructions(tid: str, instructions: str) -> bool:
+    """Set (or clear, with "") a thread's custom instructions.
+
+    Instructions are the user's own standing directions for this one
+    conversation — a role, a style, a project context — sent to the
+    model as an extra system message on every turn of the thread.
+    Capped at 4000 chars so a pasted wall of text cannot bloat every
+    turn's prompt. Returns False if the thread does not exist.
+    """
+    c = _conn()
+    cur = c.execute("UPDATE threads SET instructions=? WHERE id=?",
+                    ((instructions or "")[:4000], tid))
+    changed = cur.rowcount > 0
+    c.commit()
+    c.close()
+    return changed
 
 
 def set_thread_pinned(tid: str, pinned: bool) -> bool:
@@ -472,12 +500,13 @@ def list_threads(include_archived: bool = False) -> list[dict]:
     c = _conn()
     where = "" if include_archived else "WHERE archived=0 "
     rows = c.execute(
-        "SELECT id, title, created, pinned, archived FROM threads "
+        "SELECT id, title, created, pinned, archived, instructions FROM threads "
         + where +
         "ORDER BY pinned DESC, created DESC LIMIT 50").fetchall()
     c.close()
     return [{"id": r[0], "title": r[1], "created": r[2],
-             "pinned": bool(r[3]), "archived": bool(r[4])} for r in rows]
+             "pinned": bool(r[3]), "archived": bool(r[4]),
+             "instructions": r[5] or ""} for r in rows]
 
 
 def list_all_threads(include_archived: bool = True) -> list[dict]:
@@ -492,23 +521,25 @@ def list_all_threads(include_archived: bool = True) -> list[dict]:
     c = _conn()
     where = "" if include_archived else "WHERE archived=0 "
     rows = c.execute(
-        "SELECT id, title, created, pinned, archived FROM threads "
+        "SELECT id, title, created, pinned, archived, instructions FROM threads "
         + where +
         "ORDER BY pinned DESC, created DESC").fetchall()
     c.close()
     return [{"id": r[0], "title": r[1], "created": r[2],
-             "pinned": bool(r[3]), "archived": bool(r[4])} for r in rows]
+             "pinned": bool(r[3]), "archived": bool(r[4]),
+             "instructions": r[5] or ""} for r in rows]
 
 
 def list_archived_threads() -> list[dict]:
     """Archived threads only, newest first, for the archive view."""
     c = _conn()
     rows = c.execute(
-        "SELECT id, title, created, pinned, archived FROM threads "
+        "SELECT id, title, created, pinned, archived, instructions FROM threads "
         "WHERE archived=1 ORDER BY created DESC LIMIT 50").fetchall()
     c.close()
     return [{"id": r[0], "title": r[1], "created": r[2],
-             "pinned": bool(r[3]), "archived": bool(r[4])} for r in rows]
+             "pinned": bool(r[3]), "archived": bool(r[4]),
+             "instructions": r[5] or ""} for r in rows]
 
 
 def search_thread_messages(tid: str, query: str,

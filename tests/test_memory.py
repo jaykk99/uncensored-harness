@@ -82,7 +82,8 @@ def test_list_all_threads_has_no_cap_and_includes_archived(memdb):
 def test_list_threads_shape(memdb):
     tid = memdb.create_thread("shape")
     (row,) = [t for t in memdb.list_threads() if t["id"] == tid]
-    assert set(row) == {"id", "title", "created", "pinned", "archived"}
+    assert set(row) == {"id", "title", "created", "pinned", "archived",
+                      "instructions"}
     assert row["title"] == "shape"
     assert row["pinned"] is False
     assert row["archived"] is False
@@ -812,3 +813,61 @@ def test_delete_after_unknown_or_foreign_cuts_nothing(memdb):
     assert memdb.delete_after(tid, 999999) == 0
     assert memdb.delete_after(other, ids[0]) == 0
     assert len(memdb.get_history(tid)) == 4
+
+
+def test_thread_instructions_default_empty(memdb):
+    tid = memdb.create_thread("t")
+    assert memdb.get_thread(tid)["instructions"] == ""
+    assert memdb.list_threads()[0]["instructions"] == ""
+
+
+def test_set_thread_instructions_roundtrip_and_clear(memdb):
+    tid = memdb.create_thread("t")
+    assert memdb.set_thread_instructions(tid, "Answer in French.") is True
+    assert memdb.get_thread(tid)["instructions"] == "Answer in French."
+    assert memdb.list_threads()[0]["instructions"] == "Answer in French."
+    assert memdb.set_thread_instructions(tid, "") is True
+    assert memdb.get_thread(tid)["instructions"] == ""
+    assert memdb.set_thread_instructions("nope-not-real", "x") is False
+
+
+def test_set_thread_instructions_caps_length(memdb):
+    tid = memdb.create_thread("t")
+    memdb.set_thread_instructions(tid, "x" * 5000)
+    assert len(memdb.get_thread(tid)["instructions"]) == 4000
+
+
+def test_duplicate_copies_instructions(memdb):
+    tid = memdb.create_thread("t")
+    memdb.set_thread_instructions(tid, "Be terse.")
+    new_id = memdb.duplicate_thread(tid)
+    assert memdb.get_thread(new_id)["instructions"] == "Be terse."
+    assert memdb.get_thread(tid)["instructions"] == "Be terse."
+
+
+def test_import_restores_instructions(memdb):
+    new_id = memdb.import_thread(
+        "t", [{"role": "user", "content": "hi"}], "Be terse.")
+    assert memdb.get_thread(new_id)["instructions"] == "Be terse."
+    # No instructions in the export: the import starts with none.
+    other = memdb.import_thread("u", [{"role": "user", "content": "hi"}])
+    assert memdb.get_thread(other)["instructions"] == ""
+
+
+def test_old_db_without_instructions_column_migrates(memdb, tmp_path, monkeypatch):
+    # DBs created before per-thread instructions have no column at all.
+    import sqlite3
+    path = str(tmp_path / "old3.db")
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, created REAL,"
+              " pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0)")
+    c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+              " thread_id TEXT, role TEXT, content TEXT, created REAL)")
+    c.execute("INSERT INTO threads VALUES (?,?,?,?,?)",
+              ("oldthreadid3", "legacy", 1.0, 0, 0))
+    c.commit()
+    c.close()
+    monkeypatch.setattr(memdb, "DB", path)
+    assert memdb.get_thread("oldthreadid3")["instructions"] == ""
+    assert memdb.set_thread_instructions("oldthreadid3", "Be terse.") is True
+    assert memdb.get_thread("oldthreadid3")["instructions"] == "Be terse."

@@ -99,7 +99,8 @@ def _synth_assistant_msg(clean: str, calls: list[dict]) -> dict:
 
 async def run_turn(history: list[dict], emit, model: str = "",
                web_search: bool = False,
-               should_stop: object = None) -> str:
+               should_stop: object = None,
+               extra_instructions: str = "") -> str:
     """Run one agent turn. emit(event_dict) is called for SSE. Returns final text.
 
     model: preferred Horde model id from the UI picker ("" = auto-route).
@@ -113,9 +114,17 @@ async def run_turn(history: list[dict], emit, model: str = "",
     A stopped turn emits {"type": "stopped"} and the stored reply carries
     a "[stopped by user]" marker, so the transcript stays honest about
     the partial answer instead of looking complete.
+    extra_instructions: the thread's own custom instructions, if the user
+    set any — sent as a second system message after the base prompt, so
+    they steer every turn of that thread without touching other threads.
     """
     messages: list[dict] = [{"role": "system",
                              "content": SYSTEM_PROMPT + "\n\n" + TOOL_FORMAT_HINT}]
+    if (extra_instructions or "").strip():
+        messages.append({"role": "system",
+                         "content": "Custom instructions for this chat "
+                                    "(follow these for every reply here):\n"
+                                    + extra_instructions.strip()})
     for m in history:
         if m["role"] in ("user", "assistant") and isinstance(m.get("content"), str):
             messages.append({"role": m["role"], "content": m["content"]})

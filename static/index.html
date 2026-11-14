@@ -207,6 +207,30 @@
     border: 1px solid var(--border); border-radius: 7px; cursor: pointer;
     font-size: 13px; padding: 5px 10px; }
   #msgsearch button:hover { border-color: var(--accent); }
+  /* Per-thread custom instructions: a toggle above the transcript and
+     a small editor panel. The toggle carries a green dot when the open
+     thread has instructions saved, so a set persona is visible at a
+     glance instead of silently steering every turn. */
+  #instrbar { display: none; align-items: center; gap: 8px;
+    padding: 10px 18px 0; }
+  #instrbar.visible { display: flex; }
+  #instrbar button { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 7px; cursor: pointer;
+    font-size: 13px; padding: 5px 10px; }
+  #instrbar button:hover { border-color: var(--accent); }
+  #instrbar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+  #instrbar .hint { font-size: 12px; color: var(--dim); }
+  #instrpanel { display: none; padding: 10px 18px 0; }
+  #instrpanel.visible { display: block; }
+  #instrpanel textarea { width: 100%; box-sizing: border-box; min-height: 64px;
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 9px; font-size: 13px;
+    padding: 8px 10px; resize: vertical; }
+  #instrpanel .row { display: flex; gap: 8px; margin-top: 6px; }
+  #instrpanel .row button { background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 7px; cursor: pointer;
+    font-size: 13px; padding: 5px 12px; }
+  #instrpanel .row button:hover { border-color: var(--accent); }
   .msg.search-hit .bubble { outline: 1px dashed var(--dim); outline-offset: 3px; }
   .msg.search-current .bubble { outline: 2px solid var(--accent); outline-offset: 3px; }
   /* Word-level match highlight: the outline alone marks the bubble,
@@ -516,6 +540,18 @@
         <button id="msgsearchnext" title="Next match">&#8595;</button>
         <button id="msgsearchmore" title="Load more matches" style="display:none">&#8230;</button>
         <button id="msgsearchclear" title="Clear search">&#215;</button>
+      </div>
+      <div id="instrbar">
+        <button id="instrtoggle" title="Custom instructions for this chat">Instructions</button>
+        <span id="instrdot" class="dot" style="display:none" title="This chat has custom instructions"></span>
+        <span class="hint">per-chat directions for the model</span>
+      </div>
+      <div id="instrpanel">
+        <textarea id="instrinput" placeholder="Custom instructions for this chat — e.g. 'Answer in French', or 'You are a senior Python dev reviewing my code'. Applies to every turn in this thread." rows="3"></textarea>
+        <div class="row">
+          <button id="instrsave">Save instructions</button>
+          <button id="instrclear">Clear</button>
+        </div>
       </div>
       <div id="chat">
         <div id="welcome">
@@ -844,7 +880,7 @@ modeImage.onclick = () => showView("image");
 modeSys.onclick = () => showView("sys");
 termbtn.onclick = () => showView(curView === "term" ? "chat" : "term");
 $("newchatbtn").onclick = () => { newChat(); showView("chat"); };
-function newChat() { threadId = ""; $("chat").querySelectorAll(".msg").forEach(e => e.remove()); const lb = $("loadolderbtn"); if (lb) lb.remove(); $("welcome").style.display = ""; clearMsgSearch(); $("msgsearch").classList.remove("visible"); updateRegenBtn(); }
+function newChat() { threadId = ""; threadInstructions = ""; $("instrinput").value = ""; $("instrpanel").classList.remove("visible"); updateInstrBar(); $("chat").querySelectorAll(".msg").forEach(e => e.remove()); const lb = $("loadolderbtn"); if (lb) lb.remove(); $("welcome").style.display = ""; clearMsgSearch(); $("msgsearch").classList.remove("visible"); updateRegenBtn(); }
 
 /* mobile drawer */
 const sidebar = $("sidebar"), scrim = $("scrim");
@@ -1306,7 +1342,16 @@ async function pumpStream(r, bubble) {
         if (msgSearchThreadId !== ev.thread_id) {
           clearMsgSearch(); msgSearchThreadId = ev.thread_id;
         }
+        const newThread = threadId !== ev.thread_id;
         threadId = ev.thread_id;
+        // A fresh thread from a first message starts with no
+        // instructions; the bar appears now the id is known.
+        if (newThread) {
+          threadInstructions = "";
+          $("instrinput").value = "";
+          $("instrpanel").classList.remove("visible");
+        }
+        updateInstrBar();
         $("msgsearch").classList.add("visible");
       }
       else if (ev.type === "thinking") setThinking(bubble, ev.text);
@@ -1564,6 +1609,36 @@ async function loadOlderMessages() {
     return false;
   }
 }
+/* ================= per-thread custom instructions ================= */
+/* The open thread's directions live on the thread row (GET
+   /api/threads/{id} returns them) and are sent to the model as a
+   second system message on every turn of that thread. A fresh thread
+   starts with none; the green dot on the toggle says when the open
+   thread has some saved. */
+let threadInstructions = "";
+function updateInstrBar() {
+  $("instrdot").style.display = threadInstructions ? "" : "none";
+  $("instrbar").classList.toggle("visible", !!threadId);
+}
+async function saveInstructions(clear) {
+  if (!threadId) { toast("Open or start a chat first.", true); return; }
+  const value = clear ? "" : $("instrinput").value;
+  try {
+    const r = await fetch("/api/threads/" + encodeURIComponent(threadId), {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ instructions: value, access_code: AC }) });
+    if (!r.ok) throw new Error("save failed");
+    threadInstructions = value;
+    $("instrinput").value = value;
+    updateInstrBar();
+    if (clear) $("instrpanel").classList.remove("visible");
+    toast(clear ? "Instructions cleared." : "Instructions saved.");
+  } catch (e) { toast("Could not save instructions.", true); }
+}
+$("instrtoggle").onclick = () => $("instrpanel").classList.toggle("visible");
+$("instrsave").onclick = () => saveInstructions(false);
+$("instrclear").onclick = () => saveInstructions(true);
+
 async function openThread(id) {
   try {
     const r = await fetch("/api/threads/" + encodeURIComponent(id) +
@@ -1576,6 +1651,10 @@ async function openThread(id) {
     if (msgSearchThreadId !== d.thread.id) clearMsgSearch();
     msgSearchThreadId = d.thread.id;
     threadId = d.thread.id;
+    threadInstructions = d.thread.instructions || "";
+    $("instrinput").value = threadInstructions;
+    $("instrpanel").classList.remove("visible");
+    updateInstrBar();
     $("msgsearch").classList.add("visible");
     renderThreadMessages(d.messages);
     // Reopening the same thread (e.g. after a delete) re-renders the

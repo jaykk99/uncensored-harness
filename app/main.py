@@ -115,7 +115,12 @@ class RouterResetRequest(BaseModel):
 
 
 class ThreadRenameRequest(BaseModel):
-    title: str = ""
+    title: str | None = None
+    # Per-thread custom instructions ("" clears them). PATCH takes either
+    # field alone or both at once, so the UI can save instructions without
+    # touching the title. None = leave it alone; only an explicit value
+    # (including "") writes.
+    instructions: str | None = None
     access_code: str = ""
 
 
@@ -256,11 +261,13 @@ def thread_import(req: ThreadImportRequest):
             thread = entry.get("thread") if isinstance(entry.get("thread"), dict) else {}
             title = thread.get("title")
             title = title.strip() if isinstance(title, str) else ""
-            entries.append((title or "untitled", entry["messages"]))
+            instr = thread.get("instructions")
+            instr = instr if isinstance(instr, str) else ""
+            entries.append((title or "untitled", entry["messages"], instr))
         new_ids = []
         total_messages = 0
-        for title, messages in entries:
-            new_ids.append(memory.import_thread(title, messages))
+        for title, messages, instr in entries:
+            new_ids.append(memory.import_thread(title, messages, instr))
             total_messages += len(messages)
         return {"imported": True, "threads": len(new_ids),
                 "messages": total_messages, "thread_ids": new_ids}
@@ -275,7 +282,9 @@ def thread_import(req: ThreadImportRequest):
                 detail="each message needs a string role and content")
     title = req.thread.get("title") if isinstance(req.thread, dict) else None
     title = title.strip() if isinstance(title, str) else ""
-    new_id = memory.import_thread(title or "untitled", req.messages)
+    instr = req.thread.get("instructions") if isinstance(req.thread, dict) else None
+    instr = instr if isinstance(instr, str) else ""
+    new_id = memory.import_thread(title or "untitled", req.messages, instr)
     return {"imported": True, "thread": memory.get_thread(new_id),
             "messages": len(req.messages)}
 
@@ -634,8 +643,10 @@ async def thread_message_edit(thread_id: str, message_id: int,
         memory.add_message(thread_id, "assistant", reply)
         return {"thread_id": thread_id, "reply": reply, "blocked": True}
     history = memory.get_history(thread_id)
+    thread = memory.get_thread(thread_id)
     return _stream_turn(thread_id, history, model=req.model or "",
-                        web_search=req.web_search)
+                        web_search=req.web_search,
+                        instructions=(thread or {}).get("instructions") or "")
 
 
 @app.delete("/api/threads/{thread_id}")
@@ -648,12 +659,25 @@ def thread_delete(thread_id: str, access_code: str = ""):
 
 @app.patch("/api/threads/{thread_id}")
 def thread_rename(thread_id: str, req: ThreadRenameRequest):
+    """Rename a thread and/or set its custom instructions.
+
+    Title and instructions are independent: either field alone, or
+    both at once. An explicit empty instructions value clears them;
+    omitting a field leaves it alone. Renaming to an empty title is
+    still a 400, and a PATCH with neither field is one too.
+    """
     _check_access(req.access_code)
-    title = (req.title or "").strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="empty title")
-    if not memory.rename_thread(thread_id, title):
+    if req.title is None and req.instructions is None:
+        raise HTTPException(status_code=400, detail="nothing to update")
+    if not memory.thread_exists(thread_id):
         raise HTTPException(status_code=404, detail="no such thread")
+    if req.title is not None:
+        title = req.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="empty title")
+        memory.rename_thread(thread_id, title)
+    if req.instructions is not None:
+        memory.set_thread_instructions(thread_id, req.instructions)
     return {"renamed": True, "thread": memory.get_thread(thread_id)}
 
 
@@ -681,7 +705,8 @@ def index():
 
 
 def _stream_turn(thread_id: str, history: list[dict], model: str = "",
-                 web_search: bool = False) -> StreamingResponse:
+                 web_search: bool = False,
+                 instructions: str = "") -> StreamingResponse:
     """Stream one agent turn over SSE, storing the reply when it lands.
 
     Shared by /api/chat (fresh user message) and regenerate (same
@@ -710,6 +735,7 @@ def _stream_turn(thread_id: str, history: list[dict], model: str = "",
                         agent_mod.run_turn(history, collect,
                                            model=model,
                                            web_search=web_search,
+                                           extra_instructions=instructions,
                                            should_stop=stop_event.is_set),
                         timeout=660)
                 except asyncio.TimeoutError:
@@ -793,8 +819,10 @@ async def chat(req: ChatRequest):
                  else memory.create_thread(message[:40]))
     memory.add_message(thread_id, "user", message)
     history = memory.get_history(thread_id)
+    thread = memory.get_thread(thread_id)
     return _stream_turn(thread_id, history, model=req.model or "",
-                        web_search=req.web_search)
+                        web_search=req.web_search,
+                        instructions=(thread or {}).get("instructions") or "")
 
 
 @app.post("/api/threads/{thread_id}/regenerate")
@@ -832,8 +860,10 @@ async def thread_regenerate(thread_id: str, req: RegenerateRequest):
         return {"thread_id": thread_id, "reply": reply, "blocked": True}
     memory.drop_last_assistant(thread_id)
     history = memory.get_history(thread_id)
+    thread = memory.get_thread(thread_id)
     return _stream_turn(thread_id, history, model=req.model or "",
-                        web_search=req.web_search)
+                        web_search=req.web_search,
+                        instructions=(thread or {}).get("instructions") or "")
 
 
 @app.post("/api/threads/{thread_id}/stop")

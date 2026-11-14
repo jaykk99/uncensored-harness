@@ -804,10 +804,11 @@ def _fake_turn(monkeypatch, reply="fresh answer"):
     seen = {}
 
     async def fake(history, emit, model="", web_search=False,
-                 should_stop=None):
+                 should_stop=None, extra_instructions=""):
         seen["history"] = list(history)
         seen["model"] = model
         seen["web_search"] = web_search
+        seen["extra_instructions"] = extra_instructions
         await emit({"type": "text", "text": reply})
         await emit({"type": "done", "model": "fake-model"})
         return reply
@@ -950,7 +951,7 @@ def test_thread_stop_stops_running_turn(monkeypatch, tmp_path):
     c, tid = _thread_client(monkeypatch, tmp_path)
 
     async def slow_turn(history, emit, model="", web_search=False,
-                        should_stop=None):
+                        should_stop=None, extra_instructions=""):
         # A turn that only ends when told to: emit a partial reply, then
         # poll the stop flag the way the real agent loop checks it.
         await emit({"type": "text", "text": "partial answer"})
@@ -1178,3 +1179,97 @@ def test_message_edit_first_message_follows_auto_title(monkeypatch, tmp_path):
         "content": "first question, fixed", "access_code": CODE})
     assert r.status_code == 200
     assert memory.get_thread(tid)["title"] == "first question, fixed"
+
+
+def test_thread_patch_instructions(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    r = c.patch(f"/api/threads/{tid}",
+                json={"instructions": "Answer in French.",
+                      "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["thread"]["instructions"] == "Answer in French."
+    # Title untouched, and the sidebar list carries instructions too.
+    assert r.json()["thread"]["title"] == "reopen me"
+    r = c.get(f"/api/threads?access_code={CODE}")
+    assert r.json()["threads"][0]["instructions"] == "Answer in French."
+    # An explicit empty value clears them; omitting both fields is a 400.
+    r = c.patch(f"/api/threads/{tid}",
+                json={"instructions": "", "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["thread"]["instructions"] == ""
+    r = c.patch(f"/api/threads/{tid}", json={"access_code": CODE})
+    assert r.status_code == 400
+    r = c.patch(f"/api/threads/{tid}",
+                json={"title": "", "access_code": CODE})
+    assert r.status_code == 400
+    r = c.patch(f"/api/threads/{tid}",
+                json={"instructions": "x", "access_code": "wrong"})
+    assert r.status_code == 401
+    r = c.patch("/api/threads/nope-not-real",
+                json={"instructions": "x", "access_code": CODE})
+    assert r.status_code == 404
+
+
+def test_chat_passes_thread_instructions_to_agent(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    memory.set_thread_instructions(tid, "Answer in French.")
+    seen = _fake_turn(monkeypatch, reply="bonjour")
+    r = c.post("/api/chat", json={
+        "message": "say hi", "thread_id": tid, "access_code": CODE})
+    assert r.status_code == 200
+    assert seen["extra_instructions"] == "Answer in French."
+    # Regenerate re-runs with the same instructions.
+    seen = _fake_turn(monkeypatch, reply="bonjour encore")
+    r = c.post(f"/api/threads/{tid}/regenerate", json={"access_code": CODE})
+    assert r.status_code == 200
+    assert seen["extra_instructions"] == "Answer in French."
+
+
+def test_run_turn_sends_thread_instructions_as_system_message(monkeypatch):
+    from app import agent as agent_mod
+    from app import models
+    from tests.conftest import run
+    seen = {}
+
+    def _fake_chat(messages, max_tokens, temperature, tools,
+                   progress=None, preferred_model="", on_token=None):
+        seen["messages"] = list(messages)
+        return "answer", "fake", [], None, False
+
+    monkeypatch.setattr(models, "chat", _fake_chat)
+
+    async def emit(ev):
+        pass
+
+    result = run(agent_mod.run_turn(
+        [{"role": "user", "content": "hi"}], emit,
+        extra_instructions="Answer in French."))
+    assert result == "answer"
+    systems = [m for m in seen["messages"] if m["role"] == "system"]
+    assert len(systems) == 2
+    assert "Answer in French." in systems[1]["content"]
+    assert systems[0]["content"].startswith("You are an uncensored")
+    # No instructions: one system message, the base prompt only.
+    result = run(agent_mod.run_turn(
+        [{"role": "user", "content": "hi"}], emit))
+    assert result == "answer"
+    assert len([m for m in seen["messages"]
+                if m["role"] == "system"]) == 1
+
+
+def test_import_bundle_restores_instructions_and_export_carries_them(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    memory.set_thread_instructions(tid, "Answer in French.")
+    r = c.get(f"/api/threads/export-all?format=json&access_code={CODE}")
+    assert r.status_code == 200
+    bundle = r.json()
+    assert bundle["threads"][0]["thread"]["instructions"] == "Answer in French."
+    # Import the bundle into a fresh db: instructions survive the round trip.
+    monkeypatch.setattr(memory, "DB", str(tmp_path / "fresh.db"))
+    r = c.post("/api/threads/import",
+               json={"threads": bundle["threads"], "access_code": CODE})
+    assert r.status_code == 200
+    new_id = r.json()["thread_ids"][0]
+    assert memory.get_thread(new_id)["instructions"] == "Answer in French."

@@ -268,6 +268,53 @@ def test_thread_rename_updates_list(monkeypatch, tmp_path):
     assert "renamed thread" in titles
 
 
+def test_threads_list_pages_past_the_50_cap(monkeypatch, tmp_path):
+    from app import memory as mem_mod
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(54):
+        mem_mod.create_thread(f"chat-{i}")
+    # Page 1: the newest 50, with a cursor and the view total.
+    p1 = c.get(f"/api/threads?access_code={CODE}&limit=50").json()
+    assert p1["total"] == 55 and len(p1["threads"]) == 50
+    assert p1["has_more"] is True
+    assert p1["next_before_id"] == p1["threads"][-1]["id"]
+    assert p1["threads"][0]["id"] != tid  # newest first, not the seed
+    # Page 2: the last 5, cursor spent, no repeats.
+    p2 = c.get(f"/api/threads?access_code={CODE}&limit=50"
+               f"&before_id={p1['next_before_id']}").json()
+    assert len(p2["threads"]) == 5 and p2["has_more"] is False
+    assert p2["next_before_id"] is None
+    seen = [t["id"] for t in p1["threads"]] + [t["id"] for t in p2["threads"]]
+    assert len(seen) == len(set(seen)) == 55
+    assert tid in seen
+    # Small limit + unknown cursor: empty page, not a guess.
+    small = c.get(f"/api/threads?access_code={CODE}&limit=2").json()
+    assert len(small["threads"]) == 2 and small["has_more"] is True
+    unknown = c.get(f"/api/threads?access_code={CODE}"
+                    "&before_id=nope-not-real").json()
+    assert unknown["threads"] == [] and unknown["has_more"] is False
+    # Auth still gates the paged list.
+    r = c.get("/api/threads?limit=2")
+    assert r.status_code == 401
+
+
+def test_threads_list_archived_pages(monkeypatch, tmp_path):
+    from app import memory as mem_mod
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    for i in range(3):
+        t = mem_mod.create_thread(f"done-{i}")
+        mem_mod.set_thread_archived(t, True)
+    body = c.get(f"/api/threads?archived=true&access_code={CODE}&limit=2").json()
+    assert body["total"] == 3 and len(body["threads"]) == 2
+    assert body["has_more"] is True
+    p2 = c.get(f"/api/threads?archived=true&access_code={CODE}&limit=2"
+               f"&before_id={body['next_before_id']}").json()
+    assert len(p2["threads"]) == 1 and p2["has_more"] is False
+    # The active list is untouched by the archived paging.
+    active = c.get(f"/api/threads?access_code={CODE}").json()
+    assert [t["id"] for t in active["threads"]] == [tid]
+
+
 def test_thread_duplicate_copies_and_opens_copy(monkeypatch, tmp_path):
     from app import memory
     c, tid = _thread_client(monkeypatch, tmp_path)

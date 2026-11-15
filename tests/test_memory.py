@@ -66,6 +66,73 @@ def test_list_threads_newest_first_and_capped(memdb):
     assert threads[-1]["id"] == ids[5]
 
 
+def test_list_threads_page_walks_past_the_50_cap(memdb):
+    # The sidebar used to stop at the newest 50 with no way past them;
+    # the cursor pages reach every older chat, newest first, exactly once.
+    ids = [memdb.create_thread(f"t-{i}") for i in range(55)]
+    p1 = memdb.list_threads_page(limit=2)
+    assert p1["total"] == 55 and len(p1["threads"]) == 2
+    assert p1["has_more"] is True
+    assert p1["next_before_id"] == p1["threads"][-1]["id"]
+    assert [t["id"] for t in p1["threads"]] == [ids[-1], ids[-2]]
+    # Walk the rest with the cursor, two at a time.
+    seen = [t["id"] for t in p1["threads"]]
+    cursor = p1["next_before_id"]
+    while True:
+        page = memdb.list_threads_page(limit=2, before_id=cursor)
+        assert page["total"] == 55
+        seen += [t["id"] for t in page["threads"]]
+        if not page["has_more"]:
+            assert page["next_before_id"] is None
+            break
+        cursor = page["next_before_id"]
+    assert seen == list(reversed(ids))
+    assert len(seen) == len(set(seen)) == 55
+
+
+def test_list_threads_page_pinned_threads_page_across_the_boundary(memdb):
+    # A pinned old thread sorts above newer unpinned ones, and the
+    # cursor must not repeat or skip it at the page boundary.
+    old = memdb.create_thread("old but important")
+    mid = memdb.create_thread("middle")
+    new = memdb.create_thread("newest")
+    memdb.set_thread_pinned(old, True)
+    p1 = memdb.list_threads_page(limit=2)
+    assert [t["id"] for t in p1["threads"]] == [old, new]
+    assert p1["has_more"] is True
+    p2 = memdb.list_threads_page(limit=2, before_id=p1["next_before_id"])
+    assert [t["id"] for t in p2["threads"]] == [mid]
+    assert p2["has_more"] is False and p2["next_before_id"] is None
+
+
+def test_list_threads_page_unknown_cursor_and_limit_clamp(memdb):
+    ids = [memdb.create_thread(f"t-{i}") for i in range(3)]
+    page = memdb.list_threads_page(before_id="nope-not-real")
+    assert page["threads"] == [] and page["total"] == 3
+    assert page["has_more"] is False and page["next_before_id"] is None
+    # limit clamps instead of erroring or returning everything.
+    assert len(memdb.list_threads_page(limit=0)["threads"]) == 1
+    assert len(memdb.list_threads_page(limit=500)["threads"]) == 3
+    assert memdb.list_threads_page(limit=500)["has_more"] is False
+
+
+def test_list_archived_threads_page_walks_past_the_50_cap(memdb):
+    ids = [memdb.create_thread(f"a-{i}") for i in range(55)]
+    for tid in ids:
+        memdb.set_thread_archived(tid, True)
+    p1 = memdb.list_archived_threads_page(limit=50)
+    assert p1["total"] == 55 and len(p1["threads"]) == 50
+    assert p1["has_more"] is True
+    assert [t["id"] for t in p1["threads"]] == list(reversed(ids))[0:50]
+    p2 = memdb.list_archived_threads_page(
+        limit=50, before_id=p1["next_before_id"])
+    assert [t["id"] for t in p2["threads"]] == list(reversed(ids))[50:]
+    assert p2["has_more"] is False and p2["next_before_id"] is None
+    # Archived threads never leak into the sidebar page.
+    assert memdb.list_threads_page()["threads"] == []
+    assert memdb.list_threads_page()["total"] == 0
+
+
 def test_list_all_threads_has_no_cap_and_includes_archived(memdb):
     # A backup built on list_threads() would silently drop the oldest
     # threads past the 50 cap, and the archived ones too.

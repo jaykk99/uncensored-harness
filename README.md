@@ -78,7 +78,7 @@ Gmail needs the one-time Google connect (OAuth consent with offline access) to m
 
 ## Capabilities
 
-- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar (reopen a past thread with its full history, rename, delete, search titles and message content, search within an open thread with prev/next jumps and the matched words highlighted in the message, search every thread's messages at once and jump straight to the turn, load older messages on long threads, delete one message or cut a thread from a message onward, regenerate the last reply with a fresh answer, edit a message or fix a user prompt and re-run the turn from it, stop a running turn server-side so the partial reply is stored with a "[stopped by user]" marker instead of running to completion, per-thread custom instructions that steer every turn of that one chat as a second system message)
+- Chat UI: thinking/progress events, token streaming, markdown, code blocks with copy/run, live app preview, inline screenshots, thread sidebar (reopen a past thread with its full history, rename, delete, search titles and message content, search within an open thread with prev/next jumps and the matched words highlighted in the message, search every thread's messages at once and jump straight to the turn, load older messages on long threads, delete one message or cut a thread from a message onward, regenerate the last reply with a fresh answer, edit a message or fix a user prompt and re-run the turn from it, stop a running turn server-side so the partial reply is stored with a "[stopped by user]" marker instead of running to completion, per-thread custom instructions that steer every turn of that one chat as a second system message, sidebar thread list pages past the 50 cap with a "Show older chats" button)
 - Terminal + filesystem, sandboxed to `HARNESS_WORKDIR` (default `~/harness-work`); path escapes rejected
 - Web search (Bing RSS primary, DuckDuckGo fallback) + fetch, with SSRF guards (no localhost/private IPs/metadata hosts)
 - Controlled headless browser (open/click/fill/text) with automatic screenshots (Playwright)
@@ -96,7 +96,7 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `GET /api/probe?provider=&model=` — per-model probe suite (slow)
 - `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, avg/p50/p95 ms latency, `stale` flag when no data in 24h)
 - `GET /api/models` — model list grouped by provider, with live key status
-- `GET /api/threads` — list threads
+- `GET /api/threads` — list threads (access_code, archived=true for the archive view; `limit` + `before_id` cursor page past the 50 cap — response is `{"threads", "total", "has_more", "next_before_id"}`, newest first, pinned on top, so the sidebar's "Show older chats" button reaches every older chat)
 - `GET /api/threads/search?q=` — search thread titles and message content (returns a match snippet per thread)
 - `GET /api/threads/export-all?format=json|md` — download every thread at once as a backup (no 50 cap, archived included); the JSON bundle restores in one upload via `POST /api/threads/import`
 - `POST /api/threads/import` — restore a thread from an exported JSON file, or a whole export-all bundle (`{"threads": [...]}`)
@@ -133,7 +133,7 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-357 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, router stats, and thread reopen/delete/rename/search/message-prune/message-edit/in-thread-search/global-message-search/search-paging/thread-instructions. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
+363 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, router stats, and thread reopen/delete/rename/search/message-prune/message-edit/in-thread-search/global-message-search/search-paging/thread-instructions/thread-list-paging. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
 
 ## Architecture
 

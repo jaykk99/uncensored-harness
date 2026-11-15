@@ -4,7 +4,8 @@ Endpoints:
   GET  /                  — chat UI
   GET  /api/health        — liveness + model routing + self-test summary
   GET  /api/self-test     — refusal-probe verification (access_code)
-  GET  /api/threads       — list threads (access_code, archived=true for the archive view)
+  GET  /api/threads       — list threads, one page at a time (access_code,
+    archived=true for the archive view, limit + before_id cursor paging)
   POST /api/threads/import — restore a thread from an exported JSON file,
     or a whole export-all bundle ({"threads": [...]})
   GET  /api/threads/export-all — download every thread at once, md or json
@@ -204,11 +205,19 @@ def router_stats_reset(req: RouterResetRequest):
 
 
 @app.get("/api/threads")
-def threads(access_code: str = "", archived: bool = False):
+def threads(access_code: str = "", archived: bool = False,
+            limit: int = 50, before_id: str | None = None):
+    """Sidebar thread list, one page at a time (default 50, newest
+    first, pinned on top). `before_id` is the id of the last thread on
+    the previous page; the response carries `has_more`,
+    `next_before_id` and the view `total`, so the sidebar's "Show
+    older chats" button reaches threads past the old 50 cap instead of
+    stranding them behind search."""
     _check_access(access_code)
     if archived:
-        return {"threads": memory.list_archived_threads()}
-    return {"threads": memory.list_threads()}
+        return memory.list_archived_threads_page(
+            limit=limit, before_id=before_id)
+    return memory.list_threads_page(limit=limit, before_id=before_id)
 
 
 @app.get("/api/threads/search")

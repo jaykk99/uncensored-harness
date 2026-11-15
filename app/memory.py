@@ -491,22 +491,69 @@ def set_thread_archived(tid: str, archived: bool) -> bool:
     return changed
 
 
+def _thread_row(r) -> dict:
+    return {"id": r[0], "title": r[1], "created": r[2],
+            "pinned": bool(r[3]), "archived": bool(r[4]),
+            "instructions": r[5] or ""}
+
+
+def list_threads_page(include_archived: bool = False, limit: int = 50,
+                      before_id: str | None = None) -> dict:
+    """One page of threads, newest first, pinned always above unpinned.
+
+    The sidebar used to cap at the newest 50 with no way past them:
+    an older chat was reachable only by guessing its title in search.
+    `before_id` pages by cursor — the id of the last thread on the
+    previous page — so a new chat arriving mid-browse never shifts a
+    page and no thread is repeated or skipped. The cursor compares the
+    whole sort key (pinned, created, id) as a tuple, so two threads
+    created in the same second still page exactly. `total` counts every
+    thread in the view even when `limit` caps the returned list;
+    `has_more` says whether another page exists, and
+    `next_before_id` is the cursor for it (the last returned id, None
+    when there is no next page). An unknown cursor id returns an empty
+    page rather than guessing. Without a cursor the first page starts
+    at the top, exactly as list_threads() did.
+    """
+    limit = max(1, min(limit, 100))
+    c = _conn()
+    where = "WHERE archived=0" if not include_archived else "WHERE 1"
+    total = c.execute(f"SELECT COUNT(*) FROM threads {where}").fetchone()[0]
+    anchor = None
+    if before_id is not None:
+        anchor = c.execute(
+            "SELECT pinned, created, id FROM threads WHERE id=?",
+            (before_id,)).fetchone()
+        if anchor is None:
+            c.close()
+            return {"threads": [], "total": int(total),
+                    "has_more": False, "next_before_id": None}
+    cursor_sql = (" AND (pinned, created, id) < (?, ?, ?)"
+                  if anchor is not None else "")
+    params = list(anchor) if anchor is not None else []
+    rows = c.execute(
+        "SELECT id, title, created, pinned, archived, instructions "
+        "FROM threads " + where + cursor_sql +
+        " ORDER BY pinned DESC, created DESC, id DESC LIMIT ?",
+        params + [limit + 1]).fetchall()
+    c.close()
+    has_more = len(rows) > limit
+    threads = [_thread_row(r) for r in rows[:limit]]
+    return {"threads": threads, "total": int(total),
+            "has_more": has_more,
+            "next_before_id": threads[-1]["id"] if has_more else None}
+
+
 def list_threads(include_archived: bool = False) -> list[dict]:
     """Newest first, except pinned threads always sort above unpinned
     ones: the sidebar only shows the newest 50, so without pinning an
     important older chat slides out of reach entirely. Archived threads
     are hidden by default — they live in the archive view instead —
-    unless include_archived asks for the full list."""
-    c = _conn()
-    where = "" if include_archived else "WHERE archived=0 "
-    rows = c.execute(
-        "SELECT id, title, created, pinned, archived, instructions FROM threads "
-        + where +
-        "ORDER BY pinned DESC, created DESC LIMIT 50").fetchall()
-    c.close()
-    return [{"id": r[0], "title": r[1], "created": r[2],
-             "pinned": bool(r[3]), "archived": bool(r[4]),
-             "instructions": r[5] or ""} for r in rows]
+    unless include_archived asks for the full list. First page only;
+    list_threads_page() pages past it.
+    """
+    return list_threads_page(
+        include_archived=include_archived)["threads"]
 
 
 def list_all_threads(include_archived: bool = True) -> list[dict]:
@@ -530,16 +577,47 @@ def list_all_threads(include_archived: bool = True) -> list[dict]:
              "instructions": r[5] or ""} for r in rows]
 
 
-def list_archived_threads() -> list[dict]:
-    """Archived threads only, newest first, for the archive view."""
+def list_archived_threads_page(limit: int = 50,
+                               before_id: str | None = None) -> dict:
+    """One page of archived threads, newest first — the same cursor
+    paging as list_threads_page, but the archive view has no pinned
+    sort, so the cursor is just (created, id). Same shape:
+    {"threads", "total", "has_more", "next_before_id"}; an unknown
+    cursor id returns an empty page rather than guessing.
+    """
+    limit = max(1, min(limit, 100))
     c = _conn()
+    total = c.execute(
+        "SELECT COUNT(*) FROM threads WHERE archived=1").fetchone()[0]
+    anchor = None
+    if before_id is not None:
+        anchor = c.execute(
+            "SELECT created, id FROM threads WHERE id=? AND archived=1",
+            (before_id,)).fetchone()
+        if anchor is None:
+            c.close()
+            return {"threads": [], "total": int(total),
+                    "has_more": False, "next_before_id": None}
+    cursor_sql = (" AND (created, id) < (?, ?)"
+                  if anchor is not None else "")
+    params = list(anchor) if anchor is not None else []
     rows = c.execute(
-        "SELECT id, title, created, pinned, archived, instructions FROM threads "
-        "WHERE archived=1 ORDER BY created DESC LIMIT 50").fetchall()
+        "SELECT id, title, created, pinned, archived, instructions "
+        "FROM threads WHERE archived=1" + cursor_sql +
+        " ORDER BY created DESC, id DESC LIMIT ?",
+        params + [limit + 1]).fetchall()
     c.close()
-    return [{"id": r[0], "title": r[1], "created": r[2],
-             "pinned": bool(r[3]), "archived": bool(r[4]),
-             "instructions": r[5] or ""} for r in rows]
+    has_more = len(rows) > limit
+    threads = [_thread_row(r) for r in rows[:limit]]
+    return {"threads": threads, "total": int(total),
+            "has_more": has_more,
+            "next_before_id": threads[-1]["id"] if has_more else None}
+
+
+def list_archived_threads() -> list[dict]:
+    """Archived threads only, newest first, for the archive view.
+    First page only; list_archived_threads_page() pages past it."""
+    return list_archived_threads_page()["threads"]
 
 
 def search_thread_messages(tid: str, query: str,

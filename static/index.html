@@ -1935,14 +1935,68 @@ $("msgsearchclear").onclick = () => {
   $("msgsearchinput").value = ""; clearMsgSearch();
   $("msgsearchinput").focus();
 };
+/* Sidebar thread paging: the list used to stop at the newest 50
+   with no way past them. The server pages by cursor (before_id =
+   last thread on the previous page); this button appends the next
+   page under the rows already shown, same shape as the message
+   search's "show more" button. A fresh loadThreads() resets to page
+   1; a thread search replaces the list outright, so the button only
+   ever exists in browse mode. */
+let threadsLoaded = 0, threadsTotal = 0;
+let threadsHasMore = false, threadsBeforeId = null;
 async function loadThreads() {
   if (!AC) return;
   try {
     const q = showingArchived ? "&archived=true" : "";
     const r = await fetch("/api/threads?access_code=" + encodeURIComponent(AC) + q);
     const d = await r.json();
+    threadsLoaded = (d.threads || []).length;
+    threadsTotal = d.total || threadsLoaded;
+    threadsHasMore = !!d.has_more;
+    threadsBeforeId = d.next_before_id || null;
     renderThreads(d.threads || []);
+    appendThreadsMoreBtn($("threads"));
   } catch (e) { /* offline */ }
+}
+function appendThreadsMoreBtn(box) {
+  const old = $("threadsmore");
+  if (old) old.remove();
+  if (!threadsHasMore) return;
+  const btn = document.createElement("button");
+  btn.className = "tbtn";
+  btn.id = "threadsmore";
+  btn.style.cssText = "width:100%;margin:6px 0;padding:8px;";
+  btn.textContent = "Show older chats (" +
+    (threadsTotal - threadsLoaded) + " more)";
+  btn.onclick = loadMoreThreads;
+  box.appendChild(btn);
+}
+/* Next page of threads, appended after the ones already shown (the
+   button is re-created last, so the rows always land above it). A
+   page that lands after the user switched to the archive view, or
+   started a search, is dropped instead of appending under the wrong
+   list: the archive flag and the search box are re-checked first. */
+async function loadMoreThreads() {
+  if (!threadsHasMore || !threadsBeforeId) return;
+  const archivedNow = showingArchived;
+  const btn = $("threadsmore");
+  if (btn) btn.disabled = true;
+  try {
+    const q = archivedNow ? "&archived=true" : "";
+    const r = await fetch("/api/threads?access_code=" + encodeURIComponent(AC) +
+      q + "&before_id=" + encodeURIComponent(threadsBeforeId));
+    if (!r.ok) throw new Error("threads failed");
+    const d = await r.json();
+    if (archivedNow !== showingArchived) return;
+    if ($("threadsearch").value.trim()) return;
+    threadsLoaded += (d.threads || []).length;
+    threadsTotal = d.total || threadsTotal;
+    threadsHasMore = !!d.has_more;
+    threadsBeforeId = d.next_before_id || null;
+    renderThreads(d.threads || [], true);
+    appendThreadsMoreBtn($("threads"));
+  } catch (e) { toast("Could not load older chats.", true); }
+  finally { if (btn) btn.disabled = false; }
 }
 /* Archive view: finished chats leave the sidebar list without being
    deleted. Toggling back shows the normal list; search still finds
@@ -1992,9 +2046,17 @@ $("importfile").onchange = async e => {
     toast(d.threads ? d.threads + " chats imported." : "Chat imported.");
   } catch (err) { toast("Import failed: " + err.message, true); }
 };
-function renderThreads(list) {
+function renderThreads(list, append) {
     const box = $("threads");
-    box.innerHTML = "";
+    if (append) {
+      /* Appending a later page: the "Show older chats" button sits
+         last in the box, so drop it first and re-add it after the
+         new rows (appendThreadsMoreBtn does the re-add). */
+      const old = $("threadsmore");
+      if (old) old.remove();
+    } else {
+      box.innerHTML = "";
+    }
     list.forEach(t => {
       const el = document.createElement("div");
       el.className = "thread" + (t.id === threadId ? " active" : "");

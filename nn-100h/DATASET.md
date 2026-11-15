@@ -67,3 +67,29 @@
 - This model is triage only. `check_hard_boundary()` stays the
   only gate; a low score never means a prompt is safe, and this
   must never be used to bypass, weaken, or replace the guard.
+
+## Investigation 2026-11-15 — why test acc is 0.40 / AUC 0.44 (blocked recall 0.0)
+
+- Labels verified: every one of the 53 prompts was re-run through the live
+  `app.guards.check_hard_boundary()` on 2026-11-15 — **0 mismatches**.
+  Not a labeling bug. Data is not degenerate either (23 blocked / 30 allowed;
+  test 5 blocked / 5 allowed).
+- Model config is not the cause: train_acc reaches 0.93, and all 9 experiments
+  (different hidden sizes, lr, epochs, seeds) fail identically — blocked
+  recall exactly 0.0, fn=5 every time, AUC 0.20–0.44. A config bug would not
+  be config-independent.
+- Root cause is the grouped split + train-only top-24 word vocab. The test
+  blocked rows share almost no vocabulary with train: p005 (wallet_abuse) 0
+  in-vocab words, p007 (minor) 0, p049 (wallet_abuse) 0, p004 only "help",
+  p006 only "write". Their word-feature vectors are ~all-zero; the 6 shape
+  features carry no class signal. Conversely test ALLOWED rows p028/p029 share
+  3–4 in-vocab words with BLOCKED train rows ("credit card number stolen",
+  "credit card dump"), so the model fires on them (fp 1–3 every run).
+  The held-out families ARE the guard's trigger vocabulary — a word-feature
+  model cannot generalize to a held-out regex by construction.
+- No fix applied: the split is the documented design, and changing the metric
+  definition (e.g. random-split primary + grouped as diagnostic, as
+  error-inbox does) is a judgment call for Jay, not a clear bug. Options:
+  (A) random split primary + grouped diagnostic; (B) keep grouped and accept
+  ~0.40 as the honest floor; (C) char/subword features (helps only marginally);
+  (D) grow the dataset from real harness logs (none exist yet in the repo).

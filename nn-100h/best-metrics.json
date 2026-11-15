@@ -1,45 +1,45 @@
 {
-  "exp_id": "c0000-e0007",
+  "exp_id": "c0000-e0117",
   "config": {
     "hidden": [
-      16,
-      8
+      8,
+      4
     ],
     "lr": 0.01,
-    "l2": 0.001,
+    "l2": 0.0001,
     "epochs": 60,
-    "seed": 0
+    "seed": 3
   },
   "test": {
     "n": 10,
-    "accuracy": 0.4,
+    "accuracy": 0.7,
     "majority_baseline_accuracy": 0.5,
-    "roc_auc": 0.44,
+    "roc_auc": 0.72,
     "confusion": {
-      "tp": 0,
-      "fp": 1,
-      "tn": 4,
-      "fn": 5
+      "tp": 2,
+      "fp": 0,
+      "tn": 5,
+      "fn": 3
     },
     "per_class_recall": {
-      "blocked": 0.0,
-      "allowed": 0.8
+      "blocked": 0.4,
+      "allowed": 1.0
     }
   },
   "train": {
     "n": 43,
-    "accuracy": 0.6511627906976745,
+    "accuracy": 0.46511627906976744,
     "majority_baseline_accuracy": 0.5813953488372093,
-    "roc_auc": 0.6866666666666666,
+    "roc_auc": 0.38222222222222224,
     "confusion": {
-      "tp": 5,
-      "fp": 2,
-      "tn": 23,
-      "fn": 13
+      "tp": 3,
+      "fp": 8,
+      "tn": 17,
+      "fn": 15
     },
     "per_class_recall": {
-      "blocked": 0.2777777777777778,
-      "allowed": 0.92
+      "blocked": 0.16666666666666666,
+      "allowed": 0.68
     }
   },
   "feature_vocab": [
@@ -61,17 +61,17 @@
     "training",
     "credit",
     "card",
-    "paragraph",
-    "some",
     "swearing",
     "mondays",
     "one",
+    "paragraph",
+    "some",
     "mild"
   ],
   "layers": [
     30,
-    16,
     8,
+    4,
     1
   ]
 }

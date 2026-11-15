@@ -1,35 +1,35 @@
 {
   "repo": "jaykk99/uncensored-harness",
-  "hours_trained": 0.0601,
-  "experiments_done": 9,
+  "hours_trained": 0.1601,
+  "experiments_done": 225,
   "best": {
-    "exp_id": "c0000-e0007",
+    "exp_id": "c0000-e0117",
     "config": {
       "hidden": [
-        16,
-        8
+        8,
+        4
       ],
       "lr": 0.01,
-      "l2": 0.001,
+      "l2": 0.0001,
       "epochs": 60,
-      "seed": 0
+      "seed": 3
     },
-    "test_acc": 0.4,
-    "auc": 0.44,
+    "test_acc": 0.7,
+    "auc": 0.72,
     "confusion": {
-      "tp": 0,
-      "fp": 1,
-      "tn": 4,
-      "fn": 5
+      "tp": 2,
+      "fp": 0,
+      "tn": 5,
+      "fn": 3
     },
     "per_class_recall": {
-      "blocked": 0.0,
-      "allowed": 0.8
+      "blocked": 0.4,
+      "allowed": 1.0
     },
-    "train_acc": 0.6512,
+    "train_acc": 0.4651,
     "majority_baseline": 0.5,
-    "seconds": 4.04
+    "seconds": 0.22
   },
   "status": "training",
-  "updated": "2026-11-14T22:45:00.620560+00:00"
+  "updated": "2026-11-15T20:38:31.017680+00:00"
 }

@@ -150,10 +150,11 @@ def test_list_threads_shape(memdb):
     tid = memdb.create_thread("shape")
     (row,) = [t for t in memdb.list_threads() if t["id"] == tid]
     assert set(row) == {"id", "title", "created", "pinned", "archived",
-                      "instructions"}
+                      "instructions", "model"}
     assert row["title"] == "shape"
     assert row["pinned"] is False
     assert row["archived"] is False
+    assert row["model"] == ""
     assert isinstance(row["created"], float)
 
 
@@ -938,3 +939,69 @@ def test_old_db_without_instructions_column_migrates(memdb, tmp_path, monkeypatc
     assert memdb.get_thread("oldthreadid3")["instructions"] == ""
     assert memdb.set_thread_instructions("oldthreadid3", "Be terse.") is True
     assert memdb.get_thread("oldthreadid3")["instructions"] == "Be terse."
+
+
+def test_thread_model_default_empty(memdb):
+    tid = memdb.create_thread("t")
+    assert memdb.get_thread(tid)["model"] == ""
+    assert memdb.list_threads()[0]["model"] == ""
+
+
+def test_set_thread_model_roundtrip_and_clear(memdb):
+    tid = memdb.create_thread("t")
+    assert memdb.set_thread_model(
+        tid, "koboldcpp/L3-8B-Stheno-v3.2") is True
+    assert memdb.get_thread(tid)["model"] == "koboldcpp/L3-8B-Stheno-v3.2"
+    assert memdb.list_threads()[0]["model"] == "koboldcpp/L3-8B-Stheno-v3.2"
+    # A later turn on another model overwrites, never appends.
+    assert memdb.set_thread_model(tid, "venice:qwen-3-6-plus") is True
+    assert memdb.get_thread(tid)["model"] == "venice:qwen-3-6-plus"
+    assert memdb.set_thread_model(tid, "") is True
+    assert memdb.get_thread(tid)["model"] == ""
+    assert memdb.set_thread_model("nope-not-real", "x") is False
+
+
+def test_set_thread_model_caps_length(memdb):
+    tid = memdb.create_thread("t")
+    memdb.set_thread_model(tid, "x" * 500)
+    assert len(memdb.get_thread(tid)["model"]) == 200
+
+
+def test_duplicate_copies_model(memdb):
+    tid = memdb.create_thread("t")
+    memdb.set_thread_model(tid, "koboldcpp/L3-8B-Stheno-v3.2")
+    new_id = memdb.duplicate_thread(tid)
+    assert memdb.get_thread(new_id)["model"] == "koboldcpp/L3-8B-Stheno-v3.2"
+    assert memdb.get_thread(tid)["model"] == "koboldcpp/L3-8B-Stheno-v3.2"
+
+
+def test_import_restores_model(memdb):
+    new_id = memdb.import_thread(
+        "t", [{"role": "user", "content": "hi"}], "", "venice:qwen-3-6-plus")
+    assert memdb.get_thread(new_id)["model"] == "venice:qwen-3-6-plus"
+    # No model in the export: the import starts with none.
+    other = memdb.import_thread("u", [{"role": "user", "content": "hi"}])
+    assert memdb.get_thread(other)["model"] == ""
+
+
+def test_old_db_without_model_column_migrates(memdb, tmp_path, monkeypatch):
+    # DBs created before per-thread model memory have no column at all.
+    import sqlite3
+    path = str(tmp_path / "old4.db")
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, created REAL,"
+              " pinned INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0,"
+              " instructions TEXT NOT NULL DEFAULT '')")
+    c.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+              " thread_id TEXT, role TEXT, content TEXT, created REAL)")
+    c.execute("INSERT INTO threads VALUES (?,?,?,?,?,?)",
+              ("oldthreadid4", "legacy", 1.0, 0, 0, ""))
+    c.commit()
+    c.close()
+    monkeypatch.setattr(memdb, "DB", path)
+    assert memdb.get_thread("oldthreadid4")["model"] == ""
+    assert memdb.set_thread_model(
+        "oldthreadid4", "koboldcpp/L3-8B-Stheno-v3.2") is True
+    assert memdb.get_thread("oldthreadid4")["model"] == (
+        "koboldcpp/L3-8B-Stheno-v3.2")
+    assert memdb.list_threads()[0]["model"] == "koboldcpp/L3-8B-Stheno-v3.2"

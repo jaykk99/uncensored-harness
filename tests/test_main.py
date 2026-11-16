@@ -1320,3 +1320,71 @@ def test_import_bundle_restores_instructions_and_export_carries_them(monkeypatch
     assert r.status_code == 200
     new_id = r.json()["thread_ids"][0]
     assert memory.get_thread(new_id)["instructions"] == "Answer in French."
+
+
+def test_chat_records_model_on_thread(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    _fake_turn(monkeypatch, reply="model answer")
+    r = c.post("/api/chat", json={
+        "message": "hello again", "thread_id": tid,
+        "model": "koboldcpp/L3-8B-Stheno-v3.2", "access_code": CODE})
+    assert r.status_code == 200
+    assert "model answer" in r.text
+    assert memory.get_thread(tid)["model"] == "koboldcpp/L3-8B-Stheno-v3.2"
+    # Thread detail carries it, so the UI can restore the picker.
+    body = c.get(f"/api/threads/{tid}?access_code={CODE}").json()
+    assert body["thread"]["model"] == "koboldcpp/L3-8B-Stheno-v3.2"
+
+
+def test_chat_empty_model_leaves_thread_model_alone(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    memory.set_thread_model(tid, "koboldcpp/L3-8B-Stheno-v3.2")
+    _fake_turn(monkeypatch, reply="auto answer")
+    r = c.post("/api/chat", json={
+        "message": "hello again", "thread_id": tid, "access_code": CODE})
+    assert r.status_code == 200
+    # "Auto" records nothing: the earlier model stays the thread's.
+    assert memory.get_thread(tid)["model"] == "koboldcpp/L3-8B-Stheno-v3.2"
+
+
+def test_regenerate_records_model_on_thread(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    _fake_turn(monkeypatch, reply="fresh answer")
+    r = c.post(f"/api/threads/{tid}/regenerate",
+               json={"model": "venice:qwen-3-6-plus", "access_code": CODE})
+    assert r.status_code == 200
+    assert memory.get_thread(tid)["model"] == "venice:qwen-3-6-plus"
+
+
+def test_thread_export_markdown_includes_model(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    memory.set_thread_model(tid, "koboldcpp/L3-8B-Stheno-v3.2")
+    r = c.get(f"/api/threads/{tid}/export?access_code={CODE}")
+    assert r.status_code == 200
+    assert "Model: koboldcpp/L3-8B-Stheno-v3.2." in r.text
+    # No model recorded: no dangling empty line in the header.
+    other = memory.create_thread("plain")
+    memory.add_message(other, "user", "hi")
+    r = c.get(f"/api/threads/{other}/export?access_code={CODE}")
+    assert "Model:" not in r.text
+
+
+def test_import_bundle_restores_model_and_export_carries_it(monkeypatch, tmp_path):
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    memory.set_thread_model(tid, "venice:qwen-3-6-plus")
+    r = c.get(f"/api/threads/export-all?format=json&access_code={CODE}")
+    assert r.status_code == 200
+    bundle = r.json()
+    assert bundle["threads"][0]["thread"]["model"] == "venice:qwen-3-6-plus"
+    # Import the bundle into a fresh db: model survives the round trip.
+    monkeypatch.setattr(memory, "DB", str(tmp_path / "fresh.db"))
+    r = c.post("/api/threads/import",
+               json={"threads": bundle["threads"], "access_code": CODE})
+    assert r.status_code == 200
+    new_id = r.json()["thread_ids"][0]
+    assert memory.get_thread(new_id)["model"] == "venice:qwen-3-6-plus"

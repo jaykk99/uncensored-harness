@@ -29,6 +29,8 @@ def _conn():
         c.execute("ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
     if "instructions" not in cols:
         c.execute("ALTER TABLE threads ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
+    if "model" not in cols:
+        c.execute("ALTER TABLE threads ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     c.execute("""CREATE TABLE IF NOT EXISTS messages
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT,
                   role TEXT, content TEXT, created REAL)""")
@@ -359,13 +361,13 @@ def message_position(tid: str, mid: int) -> dict | None:
 def get_thread(tid: str) -> dict | None:
     c = _conn()
     row = c.execute(
-        "SELECT id, title, created, pinned, archived, instructions FROM threads WHERE id=?", (tid,)).fetchone()
+        "SELECT id, title, created, pinned, archived, instructions, model FROM threads WHERE id=?", (tid,)).fetchone()
     c.close()
     if not row:
         return None
     return {"id": row[0], "title": row[1], "created": row[2],
             "pinned": bool(row[3]), "archived": bool(row[4]),
-            "instructions": row[5] or ""}
+            "instructions": row[5] or "", "model": row[6] or ""}
 
 
 def delete_thread(tid: str) -> bool:
@@ -417,13 +419,15 @@ def duplicate_thread(tid: str) -> str | None:
     new_id = create_thread(f"{base}{suffix}")
     if src.get("instructions"):
         set_thread_instructions(new_id, src["instructions"])
+    if src.get("model"):
+        set_thread_model(new_id, src["model"])
     for m in get_all_messages(tid):
         add_message(new_id, m["role"], m["content"])
     return new_id
 
 
 def import_thread(title: str, messages: list[dict],
-                  instructions: str = "") -> str:
+                  instructions: str = "", model: str = "") -> str:
     """Create a new thread from an exported thread's messages, in order.
 
     Export has existed since the sidebar gained per-thread actions, but
@@ -434,12 +438,15 @@ def import_thread(title: str, messages: list[dict],
     with the original) and starts unpinned and unarchived, like a
     duplicate, even if the exported thread was pinned or archived.
     Instructions do carry over: they are part of how the thread was
-    meant to behave, not a sidebar state. Callers must validate message
-    shape first; entries here are trusted to carry string role/content.
+    meant to behave, not a sidebar state. The recorded model carries
+    over too, so the restored thread reopens on the model it was
+    chatted with. Callers must validate message shape first; entries here are trusted to carry string role/content.
     """
     new_id = create_thread(title or "untitled")
     if instructions:
         set_thread_instructions(new_id, instructions)
+    if model:
+        set_thread_model(new_id, model)
     for m in messages:
         add_message(new_id, m["role"], m["content"])
     return new_id
@@ -457,6 +464,26 @@ def set_thread_instructions(tid: str, instructions: str) -> bool:
     c = _conn()
     cur = c.execute("UPDATE threads SET instructions=? WHERE id=?",
                     ((instructions or "")[:4000], tid))
+    changed = cur.rowcount > 0
+    c.commit()
+    c.close()
+    return changed
+
+
+def set_thread_model(tid: str, model: str) -> bool:
+    """Record the model last used for a turn in this thread.
+
+    The picker is global (localStorage), so reopening an old chat used
+    to answer with whatever model happens to be selected now, not the
+    one the conversation was actually held with. The thread remembers
+    the model param of its latest turn ("" = auto, never stored), and
+    the UI restores the picker from it on open. Capped at 200 chars:
+    a model id is a short provider:model string. Returns False if the
+    thread does not exist.
+    """
+    c = _conn()
+    cur = c.execute("UPDATE threads SET model=? WHERE id=?",
+                    ((model or "")[:200], tid))
     changed = cur.rowcount > 0
     c.commit()
     c.close()
@@ -494,7 +521,7 @@ def set_thread_archived(tid: str, archived: bool) -> bool:
 def _thread_row(r) -> dict:
     return {"id": r[0], "title": r[1], "created": r[2],
             "pinned": bool(r[3]), "archived": bool(r[4]),
-            "instructions": r[5] or ""}
+            "instructions": r[5] or "", "model": r[6] or ""}
 
 
 def list_threads_page(include_archived: bool = False, limit: int = 50,
@@ -532,7 +559,7 @@ def list_threads_page(include_archived: bool = False, limit: int = 50,
                   if anchor is not None else "")
     params = list(anchor) if anchor is not None else []
     rows = c.execute(
-        "SELECT id, title, created, pinned, archived, instructions "
+        "SELECT id, title, created, pinned, archived, instructions, model "
         "FROM threads " + where + cursor_sql +
         " ORDER BY pinned DESC, created DESC, id DESC LIMIT ?",
         params + [limit + 1]).fetchall()
@@ -568,13 +595,13 @@ def list_all_threads(include_archived: bool = True) -> list[dict]:
     c = _conn()
     where = "" if include_archived else "WHERE archived=0 "
     rows = c.execute(
-        "SELECT id, title, created, pinned, archived, instructions FROM threads "
+        "SELECT id, title, created, pinned, archived, instructions, model FROM threads "
         + where +
         "ORDER BY pinned DESC, created DESC").fetchall()
     c.close()
     return [{"id": r[0], "title": r[1], "created": r[2],
              "pinned": bool(r[3]), "archived": bool(r[4]),
-             "instructions": r[5] or ""} for r in rows]
+             "instructions": r[5] or "", "model": r[6] or ""} for r in rows]
 
 
 def list_archived_threads_page(limit: int = 50,
@@ -602,7 +629,7 @@ def list_archived_threads_page(limit: int = 50,
                   if anchor is not None else "")
     params = list(anchor) if anchor is not None else []
     rows = c.execute(
-        "SELECT id, title, created, pinned, archived, instructions "
+        "SELECT id, title, created, pinned, archived, instructions, model "
         "FROM threads WHERE archived=1" + cursor_sql +
         " ORDER BY created DESC, id DESC LIMIT ?",
         params + [limit + 1]).fetchall()

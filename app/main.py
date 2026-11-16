@@ -272,11 +272,13 @@ def thread_import(req: ThreadImportRequest):
             title = title.strip() if isinstance(title, str) else ""
             instr = thread.get("instructions")
             instr = instr if isinstance(instr, str) else ""
-            entries.append((title or "untitled", entry["messages"], instr))
+            mdl = thread.get("model")
+            mdl = mdl if isinstance(mdl, str) else ""
+            entries.append((title or "untitled", entry["messages"], instr, mdl))
         new_ids = []
         total_messages = 0
-        for title, messages, instr in entries:
-            new_ids.append(memory.import_thread(title, messages, instr))
+        for title, messages, instr, mdl in entries:
+            new_ids.append(memory.import_thread(title, messages, instr, mdl))
             total_messages += len(messages)
         return {"imported": True, "threads": len(new_ids),
                 "messages": total_messages, "thread_ids": new_ids}
@@ -293,7 +295,9 @@ def thread_import(req: ThreadImportRequest):
     title = title.strip() if isinstance(title, str) else ""
     instr = req.thread.get("instructions") if isinstance(req.thread, dict) else None
     instr = instr if isinstance(instr, str) else ""
-    new_id = memory.import_thread(title or "untitled", req.messages, instr)
+    mdl = req.thread.get("model") if isinstance(req.thread, dict) else None
+    mdl = mdl if isinstance(mdl, str) else ""
+    new_id = memory.import_thread(title or "untitled", req.messages, instr, mdl)
     return {"imported": True, "thread": memory.get_thread(new_id),
             "messages": len(req.messages)}
 
@@ -457,6 +461,9 @@ def _thread_markdown(thread: dict, messages: list[dict]) -> str:
         started = datetime.datetime.fromtimestamp(
             created, datetime.timezone.utc).isoformat()
         lines.append(f"Thread {thread['id']}, started {started}.")
+        lines.append("")
+    if thread.get("model"):
+        lines.append(f"Model: {thread['model']}.")
         lines.append("")
     labels = {"user": "You", "assistant": "Assistant"}
     for m in messages:
@@ -724,6 +731,14 @@ def _stream_turn(thread_id: str, history: list[dict], model: str = "",
     event are identical in both cases, so they live here once instead
     of drifting apart.
     """
+    # Remember the model on the thread before the turn runs, so a
+    # reopened chat restores the picker to the model it was actually
+    # held with instead of whatever is selected globally now. An
+    # empty model ("auto") records nothing, leaving any earlier model
+    # in place. Recording up front, not when the reply lands, so a
+    # turn that errors or times out still leaves the right model.
+    if model:
+        memory.set_thread_model(thread_id, model)
     async def stream():
         yield f"data: {json.dumps({'type': 'thread', 'thread_id': thread_id})}\n\n"
 

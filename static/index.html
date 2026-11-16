@@ -725,7 +725,12 @@ async function loadServerModels() {
     groups.forEach(g => MODELS.push(g));
     rebuildHordeIds();
     const all = MODELS.flatMap(g => g.items);
-    if (!all.some(m => m.id === selModel.id)) {
+    // The server catalog replaced the picker list: a thread opened
+    // before this fetch landed may have restored a model by its
+    // hardcoded id, which no longer matches. Re-apply the open
+    // thread's recorded model against the fresh list first; only fall
+    // back to the first live model when no thread model applies.
+    if (!restoreThreadModel() && !all.some(m => m.id === selModel.id)) {
       selModel = all.find(m => m.live) || all[0];
       localStorage.setItem("harness_model", JSON.stringify(selModel));
     }
@@ -837,6 +842,11 @@ function renderPicker() {
 function selectModel(m) {
   selModel = m;
   localStorage.setItem("harness_model", JSON.stringify(m));
+  // A manual pick mid-thread is the model the next turn will use,
+  // so it replaces the thread's recorded model until the server
+  // records the turn: a later catalog reload must not restore the
+  // stale stored one over the user's pick.
+  if (threadId) threadModel = modelParamFor(m);
   renderPicker();
   modelmenu.classList.remove("open");
   if (m.needsKey) toast("That model needs its API key. It will be skipped.", true);
@@ -880,7 +890,7 @@ modeImage.onclick = () => showView("image");
 modeSys.onclick = () => showView("sys");
 termbtn.onclick = () => showView(curView === "term" ? "chat" : "term");
 $("newchatbtn").onclick = () => { newChat(); showView("chat"); };
-function newChat() { threadId = ""; threadInstructions = ""; $("instrinput").value = ""; $("instrpanel").classList.remove("visible"); updateInstrBar(); $("chat").querySelectorAll(".msg").forEach(e => e.remove()); const lb = $("loadolderbtn"); if (lb) lb.remove(); $("welcome").style.display = ""; clearMsgSearch(); $("msgsearch").classList.remove("visible"); updateRegenBtn(); }
+function newChat() { threadId = ""; threadInstructions = ""; threadModel = ""; $("instrinput").value = ""; $("instrpanel").classList.remove("visible"); updateInstrBar(); $("chat").querySelectorAll(".msg").forEach(e => e.remove()); const lb = $("loadolderbtn"); if (lb) lb.remove(); $("welcome").style.display = ""; clearMsgSearch(); $("msgsearch").classList.remove("visible"); updateRegenBtn(); }
 
 /* mobile drawer */
 const sidebar = $("sidebar"), scrim = $("scrim");
@@ -1616,6 +1626,24 @@ async function loadOlderMessages() {
    starts with none; the green dot on the toggle says when the open
    thread has some saved. */
 let threadInstructions = "";
+/* The model last used in the open thread, as the server recorded it
+   (the model param of its latest turn, "" = auto / none yet). The
+   picker is global, so without this a reopened chat answers with
+   whatever model is selected now, not the one the conversation was
+   held with. restoreThreadModel() below switches the picker to it. */
+let threadModel = "";
+function restoreThreadModel() {
+  if (!threadModel) return false;
+  const all = MODELS.flatMap(g => g.items);
+  const m = all.find(x => !x.disabled &&
+    (modelParamFor(x) === threadModel || x.id === threadModel));
+  if (!m || m.id === selModel.id) return !!m;
+  selModel = m;
+  localStorage.setItem("harness_model", JSON.stringify(selModel));
+  renderPicker();
+  toast("Model switched to " + m.label + " (this chat's model).");
+  return true;
+}
 function updateInstrBar() {
   $("instrdot").style.display = threadInstructions ? "" : "none";
   $("instrbar").classList.toggle("visible", !!threadId);
@@ -1655,6 +1683,11 @@ async function openThread(id) {
     $("instrinput").value = threadInstructions;
     $("instrpanel").classList.remove("visible");
     updateInstrBar();
+    // Reopen on the model this chat was held with, not whatever the
+    // picker happens to hold now. A stored id the catalog no longer
+    // carries leaves the picker alone.
+    threadModel = d.thread.model || "";
+    restoreThreadModel();
     $("msgsearch").classList.add("visible");
     renderThreadMessages(d.messages);
     // Reopening the same thread (e.g. after a delete) re-renders the

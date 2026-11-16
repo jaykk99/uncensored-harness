@@ -335,6 +335,7 @@ class Trainer:
         self.dim = len(self.vocab) + 6
         prev = _load_json(BASE / "status.json", {})
         self.prev_hours = float(prev.get("hours_trained", 0.0))
+        self.prev_status = prev.get("status", "training")
         self.experiments_done = self._count_experiments()
         self.best = _load_json(BASE / "best.json", None)
         self._last_heartbeat = 0.0
@@ -465,6 +466,12 @@ class Trainer:
         return record
 
     def run(self) -> int:
+        if self.prev_status == "done":
+            # Terminal state: touch NOTHING (no status/heartbeat writes),
+            # so the CircleCI commit step finds no changes and the chain
+            # stops instead of looping on empty checkpoint commits.
+            print("already done, nothing to do")
+            return 0
         if self.hours_now() >= TARGET_HOURS:
             self.write_status("done")
             print("100h target already banked; status=done")

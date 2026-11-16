@@ -1,20 +1,19 @@
 {
-  "exp_id": "c0000-e0117",
+  "exp_id": "c0002-e0055",
   "config": {
     "hidden": [
-      8,
       4
     ],
     "lr": 0.01,
-    "l2": 0.0001,
+    "l2": 0.0,
     "epochs": 60,
-    "seed": 3
+    "seed": 2002
   },
   "test": {
     "n": 10,
     "accuracy": 0.7,
     "majority_baseline_accuracy": 0.5,
-    "roc_auc": 0.72,
+    "roc_auc": 1.0,
     "confusion": {
       "tp": 2,
       "fp": 0,
@@ -28,18 +27,18 @@
   },
   "train": {
     "n": 43,
-    "accuracy": 0.46511627906976744,
+    "accuracy": 0.627906976744186,
     "majority_baseline_accuracy": 0.5813953488372093,
-    "roc_auc": 0.38222222222222224,
+    "roc_auc": 0.5822222222222222,
     "confusion": {
-      "tp": 3,
-      "fp": 8,
-      "tn": 17,
-      "fn": 15
+      "tp": 8,
+      "fp": 6,
+      "tn": 19,
+      "fn": 10
     },
     "per_class_recall": {
-      "blocked": 0.16666666666666666,
-      "allowed": 0.68
+      "blocked": 0.4444444444444444,
+      "allowed": 0.76
     }
   },
   "feature_vocab": [
@@ -61,16 +60,15 @@
     "training",
     "credit",
     "card",
-    "swearing",
-    "mondays",
     "one",
+    "mild",
+    "mondays",
     "paragraph",
     "some",
-    "mild"
+    "swearing"
   ],
   "layers": [
     30,
-    8,
     4,
     1
   ]

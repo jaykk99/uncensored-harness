@@ -1,44 +1,44 @@
 {
-  "exp_id": "c0002-e0055",
+  "exp_id": "c0038-e0134",
   "config": {
     "hidden": [
-      4
+      8
     ],
     "lr": 0.01,
     "l2": 0.0,
     "epochs": 60,
-    "seed": 2002
+    "seed": 38002
   },
   "test": {
     "n": 10,
-    "accuracy": 0.7,
+    "accuracy": 0.8,
     "majority_baseline_accuracy": 0.5,
     "roc_auc": 1.0,
     "confusion": {
-      "tp": 2,
+      "tp": 3,
       "fp": 0,
       "tn": 5,
-      "fn": 3
+      "fn": 2
     },
     "per_class_recall": {
-      "blocked": 0.4,
+      "blocked": 0.6,
       "allowed": 1.0
     }
   },
   "train": {
     "n": 43,
-    "accuracy": 0.627906976744186,
+    "accuracy": 0.6744186046511628,
     "majority_baseline_accuracy": 0.5813953488372093,
-    "roc_auc": 0.5822222222222222,
+    "roc_auc": 0.7177777777777777,
     "confusion": {
       "tp": 8,
-      "fp": 6,
-      "tn": 19,
+      "fp": 4,
+      "tn": 21,
       "fn": 10
     },
     "per_class_recall": {
       "blocked": 0.4444444444444444,
-      "allowed": 0.76
+      "allowed": 0.84
     }
   },
   "feature_vocab": [
@@ -49,8 +49,8 @@
     "filter",
     "draft",
     "mail",
-    "own",
     "list",
+    "own",
     "page",
     "kit",
     "give",
@@ -58,18 +58,18 @@
     "help",
     "company",
     "training",
-    "credit",
     "card",
+    "credit",
     "one",
-    "mild",
-    "mondays",
     "paragraph",
-    "some",
-    "swearing"
+    "swearing",
+    "mondays",
+    "mild",
+    "some"
   ],
   "layers": [
     30,
-    4,
+    8,
     1
   ]
 }

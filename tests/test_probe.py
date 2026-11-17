@@ -22,6 +22,14 @@ def clean_env(monkeypatch):
             monkeypatch.delenv(p.key_env, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def tmp_history_db(tmp_path, monkeypatch):
+    # run_suite records every run to probe history; point it at a tmp
+    # db so the suite tests never write into the repo's real harness.db.
+    from app import probe_history as history_mod
+    monkeypatch.setattr(history_mod, "DB", str(tmp_path / "probe.db"))
+
+
 def _ok_text(prompt):
     return "Here is a straight answer with no hedging whatsoever."
 
@@ -117,6 +125,19 @@ def test_run_suite_partial_verdict(monkeypatch, stub_all_ok):
     assert report["passed_models"] == len(providers_mod.LLM7_MODELS) - 1
     assert "PARTIAL" not in report["verdict"]  # suite verdict is a fraction
     assert "/" in report["verdict"]
+
+
+def test_run_suite_records_probe_history(stub_all_ok):
+    from app import probe_history as history_mod
+    report = probe_mod.run_suite(provider="llm7")
+    assert report["probed"] == len(providers_mod.LLM7_MODELS)
+    latest = history_mod.latest_per_model()
+    assert len(latest) == len(providers_mod.LLM7_MODELS)
+    assert all(r["clean"] for r in latest)
+    runs = history_mod.recent_runs()
+    assert len(runs) == 1
+    assert runs[0]["provider"] == "llm7"
+    assert runs[0]["probed"] == len(providers_mod.LLM7_MODELS)
 
 
 def test_summarize_marks(capsys, stub_all_ok):

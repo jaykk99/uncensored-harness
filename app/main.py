@@ -4,6 +4,11 @@ Endpoints:
   GET  /                  — chat UI
   GET  /api/health        — liveness + model routing + self-test summary
   GET  /api/self-test     — refusal-probe verification (access_code)
+  GET  /api/probe         — per-model probe suite (slow)
+  GET  /api/probe/history — last probe verdict per model + recent runs
+  POST /api/probe/history/clear — wipe probe history
+  GET  /api/router-stats  — per-leg health (attempts, success rate,
+    refusals, errors, avg/p50/p95 ms latency, `stale` flag)
   GET  /api/threads       — list threads, one page at a time (access_code,
     archived=true for the archive view, limit + before_id cursor paging)
   POST /api/threads/import — restore a thread from an exported JSON file,
@@ -115,6 +120,10 @@ class RouterResetRequest(BaseModel):
     access_code: str = ""
 
 
+class ThreadAccessRequest(BaseModel):
+    access_code: str = ""
+
+
 class ThreadRenameRequest(BaseModel):
     title: str | None = None
     # Per-thread custom instructions ("" clears them). PATCH takes either
@@ -180,6 +189,40 @@ def probe(provider: str = "", model: str = "", access_code: str = ""):
         if model not in allowed:
             raise HTTPException(status_code=400, detail="unknown model id")
     return probe_mod.run_suite(provider=provider, model_id=model)
+
+
+@app.get("/api/probe/history")
+def probe_history(access_code: str = "", limit: int = 20):
+    """Last probe verdict per model, plus the recent runs behind them.
+
+    A probe run is slow (each live model answers every refusal probe),
+    so its verdicts are recorded when the run finishes (see
+    probe_history.record_run) and read back here instead of re-running
+    the suite. `latest` is one entry per model ever probed — the
+    newest verdict for that model, with its per-probe rows and when it
+    was probed — and `runs` is the audit trail of suite runs, newest
+    first. Empty history (never probed) is `{"latest": [], "runs": []}`,
+    not an error: the System tab shows "not probed yet" until the
+    first run lands.
+    """
+    _check_access(access_code)
+    from . import probe_history as history_mod
+    limit = max(1, min(limit, 50))
+    return {"latest": history_mod.latest_per_model(),
+            "runs": history_mod.recent_runs(limit=limit)}
+
+
+@app.post("/api/probe/history/clear")
+def probe_history_clear(req: ThreadAccessRequest):
+    """Wipe probe history (all runs and their per-model verdicts).
+
+    Stale verdicts stop describing the present after a provider outage
+    is fixed or the probe set changes; clearing gives the System tab a
+    clean slate, and the history rebuilds from the next probe run.
+    """
+    _check_access(req.access_code)
+    from . import probe_history as history_mod
+    return {"cleared": history_mod.clear()}
 
 
 @app.get("/api/router-stats")
@@ -503,10 +546,6 @@ def thread_export(thread_id: str, format: str = "md",
                     media_type="text/markdown",
                     headers={"Content-Disposition":
                              f'attachment; filename="thread-{thread_id}.md"'})
-
-
-class ThreadAccessRequest(BaseModel):
-    access_code: str = ""
 
 
 class ThreadPinRequest(BaseModel):

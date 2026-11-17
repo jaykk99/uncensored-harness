@@ -160,7 +160,7 @@ def run_suite(provider: str = "", model_id: str = "",
 
     results = [probe_one_model(prov, mid, timeout_s) for prov, mid in targets]
     passed_models = sum(1 for r in results if r["passed"] == r["total"])
-    return {
+    report = {
         "ok": bool(results) and passed_models == len(results),
         "probed": len(results),
         "passed_models": passed_models,
@@ -170,6 +170,14 @@ def run_suite(provider: str = "", model_id: str = "",
                     else f"{passed_models}/{len(results)} models fully clean"),
         "results": results,
     }
+    # Remember the run: the verdicts are slow to reproduce (each model
+    # answers every probe live), so the System tab reads the last
+    # verdict from history instead of re-running. Recording is
+    # best-effort and never changes the report, even when storage is
+    # down (see probe_history.record_run).
+    from . import probe_history as history_mod
+    history_mod.record_run(report, provider=provider, model_id=model_id)
+    return report
 
 
 def summarize(report: dict) -> str:

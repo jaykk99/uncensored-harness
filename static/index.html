@@ -2473,15 +2473,44 @@ async function loadProbeList() {
   const box = $("probelist");
   try {
     const d = await (await fetch("/api/models?access_code=" + encodeURIComponent(AC))).json();
+    let hist = { latest: [] };
+    try { hist = await (await fetch("/api/probe/history?access_code=" + encodeURIComponent(AC))).json(); } catch (e) { /* history is a nicety; the probe list still works without it */ }
+    const lastByModel = {};
+    (hist.latest || []).forEach(l => { lastByModel[l.model] = l; });
     const groups = (d.groups || []).filter(g => g.items.some(m => m.live));
     if (!groups.length) { box.innerHTML = `<div class="sysempty">no live providers</div>`; return; }
     box.innerHTML = "";
+    // One line per live model: its last probe verdict and when it was
+    // probed, so the tab answers "was this model clean last time?"
+    // without re-running the slow suite. Unprobed models say so.
+    const renderLast = (row, g) => {
+      const el = row.querySelector(".plast");
+      let h = "";
+      g.items.filter(m => m.live).forEach(m => {
+        const l = lastByModel[m.id];
+        const short = esc(m.id.split(":").slice(1).join(":"));
+        if (!l) { h += `<div class="presult"><span class="pmeta">${short} — not probed yet</span></div>`; return; }
+        const ok = l.passed === l.total;
+        const when = l.probed_at ? new Date(l.probed_at * 1000).toLocaleString() : "";
+        h += `<div class="presult"><span class="${ok ? "pass" : "fail"}">${ok ? "PASS" : "FAIL"}</span>` +
+          `<span class="mid">${short}</span>` +
+          `<span class="pmeta">last probe ${l.passed}/${l.total}${l.error ? " — " + esc(l.error.slice(0, 80)) : ""} · ${esc(when)}</span></div>`;
+      });
+      el.innerHTML = h;
+    };
+    const refreshHistory = async () => {
+      try {
+        const h2 = await (await fetch("/api/probe/history?access_code=" + encodeURIComponent(AC))).json();
+        (h2.latest || []).forEach(l => { lastByModel[l.model] = l; });
+      } catch (e) { /* keep the stale lines; the fresh run is on screen */ }
+    };
     groups.forEach(g => {
       const live = g.items.filter(m => m.live).length;
       const row = document.createElement("div");
       row.innerHTML = `<div class="prow"><span class="pname">${esc(g.company)} <span class="pmeta">${esc(g.provider)} · ${live} live model${live === 1 ? "" : "s"}</span></span>` +
-        `<button class="pbtn">Probe</button></div><div class="presults" style="display:none"></div>`;
+        `<button class="pbtn">Probe</button></div><div class="presults" style="display:none"></div><div class="plast"></div>`;
       const btn = row.querySelector(".pbtn"), res = row.querySelector(".presults");
+      renderLast(row, g);
       btn.onclick = async () => {
         btn.disabled = true; btn.textContent = "Probing...";
         res.style.display = ""; res.innerHTML = `<div class="sysempty">running refusal probes against ${live} model(s) — this takes a while...</div>`;
@@ -2497,11 +2526,29 @@ async function loadProbeList() {
               `<span class="pmeta">${m.passed}/${m.total}${m.error ? " — " + esc(m.error.slice(0, 80)) : ""}</span></div>`;
           });
           res.innerHTML = h;
+          // The run recorded itself to history; refresh the last-probe
+          // lines so they match the fresh verdicts on screen.
+          await refreshHistory();
+          renderLast(row, g);
         } catch (e) { res.innerHTML = `<div class="sysempty">probe failed: ${esc(String(e))}</div>`; }
         btn.disabled = false; btn.textContent = "Probe";
       };
       box.appendChild(row);
     });
+    const clearRow = document.createElement("div");
+    clearRow.innerHTML = `<div style="margin-top:10px"><button class="pbtn" id="phistclear">Clear probe history</button> <span class="note">clears saved verdicts (e.g. after a provider outage is fixed)</span></div>`;
+    box.appendChild(clearRow);
+    $("phistclear").onclick = async () => {
+      if (!confirm("Clear all saved probe verdicts? They rebuild on the next probe run.")) return;
+      try {
+        const r = await fetch("/api/probe/history/clear", { method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ access_code: AC }) });
+        const dd = await r.json();
+        if (!r.ok) throw new Error(dd.detail || "clear failed");
+        loadProbeList();
+      } catch (e) { alert("clear failed: " + e.message); }
+    };
   } catch (e) { box.innerHTML = `<div class="sysempty">failed to load: ${esc(String(e))}</div>`; }
 }
 

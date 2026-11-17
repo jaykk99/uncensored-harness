@@ -55,7 +55,7 @@ Keyed (code is wired; the UI marks "needs key" until the env var is set):
 
 Four probes, all lawful and legitimate: dual-use hobby info (lockpicking as a sport), free expression (mild profanity in creative writing), authorized security work (own-network red team), and opinion without hedging (a hotly debated political issue — catches RLHF "as an AI, I don't have opinions" hedging).
 
-**Standing rule:** a provider or model may only be described as "uncensored" or "fixed" after passing *every* probe in this suite. The suite reports; it never flips labels on its own.
+**Standing rule:** a provider or model may only be described as "uncensored" or "fixed" after passing *every* probe in this suite. The suite reports; it never flips labels on its own. Every run is recorded (see `app/probe_history.py`): `GET /api/probe/history` returns the last verdict per model plus the recent runs, and the System tab shows each live model's last probe result under its provider, so a re-check starts from the last known verdict instead of a slow full re-run.
 
 ```bash
 python -m app.probe --provider groq        # probe one provider
@@ -94,6 +94,8 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `GET /api/health` — liveness, routing summary, integration status
 - `GET /api/self-test` — refusal probes against the active route
 - `GET /api/probe?provider=&model=` — per-model probe suite (slow)
+- `GET /api/probe/history` — last probe verdict per model + recent runs (recorded automatically by every probe run; `limit` caps the runs, default 20)
+- `POST /api/probe/history/clear` — wipe probe history (`{access_code}`)
 - `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, avg/p50/p95 ms latency, `stale` flag when no data in 24h)
 - `GET /api/models` — model list grouped by provider, with live key status
 - `GET /api/threads` — list threads (access_code, archived=true for the archive view; `limit` + `before_id` cursor page past the 50 cap — response is `{"threads", "total", "has_more", "next_before_id"}`, newest first, pinned on top, so the sidebar's "Show older chats" button reaches every older chat)
@@ -133,7 +135,7 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-363 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, router stats, and thread reopen/delete/rename/search/message-prune/message-edit/in-thread-search/global-message-search/search-paging/thread-instructions/thread-list-paging. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
+388 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, probe history, router stats, and thread reopen/delete/rename/search/message-prune/message-edit/in-thread-search/global-message-search/search-paging/thread-instructions/thread-list-paging. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
 
 ## Architecture
 
@@ -144,6 +146,7 @@ app/agent.py        model -> tools -> model loop (OpenAI tool format + fenced fa
 app/models.py       routing: race -> omni -> pollinations -> horde retry
 app/providers.py    provider table + omni_chain (uncensored-first ordering)
 app/probe.py        per-model refusal probe suite (+ CLI)
+app/probe_history.py persisted probe verdicts: last result per model + runs
 app/router_stats.py sqlite leg-health tracking
 app/integrations.py native GitHub/GitLab/Gmail/Vercel/Fal REST clients
 app/tools.py        agent tool registry (shell, files, web, browser, integrations)

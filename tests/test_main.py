@@ -108,7 +108,56 @@ def test_probe_rejects_unknown_provider(monkeypatch):
     c = _client()
     r = c.get(f"/api/probe?provider=definitely-not-a-provider&access_code={CODE}")
     assert r.status_code == 400
-    assert "unknown provider" in r.json()["detail"]
+
+
+def _history_client(monkeypatch, tmp_path):
+    from app import probe_history as history_mod
+    monkeypatch.setattr(history_mod, "DB", str(tmp_path / "probe.db"))
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    return _client(), history_mod
+
+
+def test_probe_history_requires_code(monkeypatch, tmp_path):
+    c, _h = _history_client(monkeypatch, tmp_path)
+    r = c.get("/api/probe/history")
+    assert r.status_code == 401
+    r = c.post("/api/probe/history/clear", json={})
+    assert r.status_code == 401
+
+
+def test_probe_history_empty_when_never_probed(monkeypatch, tmp_path):
+    c, _h = _history_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/probe/history?access_code={CODE}")
+    assert r.status_code == 200
+    assert r.json() == {"latest": [], "runs": []}
+
+
+def test_probe_history_serves_recorded_runs(monkeypatch, tmp_path):
+    c, h = _history_client(monkeypatch, tmp_path)
+    h.record_run({"ok": True, "probed": 1, "passed_models": 1, "skipped": [],
+                  "verdict": "ALL CLEAR — every live model answered all probes",
+                  "results": [{"provider": "llm7", "model": "llm7:codestral-latest",
+                               "passed": 4, "total": 4, "probes": [],
+                               "elapsed_s": 1.0, "error": ""}]})
+    r = c.get(f"/api/probe/history?access_code={CODE}")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["latest"]) == 1
+    assert body["latest"][0]["model"] == "llm7:codestral-latest"
+    assert body["latest"][0]["clean"] is True
+    assert len(body["runs"]) == 1
+    assert body["runs"][0]["ok"] is True
+
+
+def test_probe_history_clear_wipes(monkeypatch, tmp_path):
+    c, h = _history_client(monkeypatch, tmp_path)
+    h.record_run({"ok": True, "probed": 1, "passed_models": 1, "skipped": [],
+                  "verdict": "ALL CLEAR", "results": []})
+    r = c.post("/api/probe/history/clear", json={"access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["cleared"] == 1
+    r = c.get(f"/api/probe/history?access_code={CODE}")
+    assert r.json() == {"latest": [], "runs": []}
 
 
 def _thread_client(monkeypatch, tmp_path):

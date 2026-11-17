@@ -1,7 +1,7 @@
 {
   "repo": "jaykk99/uncensored-harness",
-  "hours_trained": 37.6601,
-  "experiments_done": 68455,
+  "hours_trained": 38.4101,
+  "experiments_done": 69509,
   "best": {
     "exp_id": "c0038-e0134",
     "config": {
@@ -30,5 +30,5 @@
     "seconds": 0.26
   },
   "status": "training",
-  "updated": "2026-11-17T14:42:03.884980+00:00"
+  "updated": "2026-11-17T15:27:17.727619+00:00"
 }

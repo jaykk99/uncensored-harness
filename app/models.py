@@ -63,11 +63,18 @@ _MIN_CALL_GAP_S = 1.5
 _last_pollinations_ts = 0.0
 
 
-def _record_leg(provider: str, model: str, outcome: str, started: float) -> None:
-    """Log one leg's outcome to router_stats. Never breaks a turn."""
+def _record_leg(provider: str, model: str, outcome: str, started: float,
+                detail: str = "") -> None:
+    """Log one leg's outcome to router_stats. Never breaks a turn.
+
+    detail is the failure reason (the exception text); router_stats
+    stores it as the leg's last_error so the health table can say why
+    a leg is failing, not just that it failed.
+    """
     try:
         router_stats.record(provider, model, outcome,
-                            int((time.time() - started) * 1000))
+                            int((time.time() - started) * 1000),
+                            detail=detail)
     except Exception:
         pass
 
@@ -487,8 +494,9 @@ def _race_first_response(messages: list[dict], max_tokens: int,
         except _Refusal:
             _record_leg("horde", horde_model, "refusal", started)
             raise
-        except Exception:
-            _record_leg("horde", horde_model, "error", started)
+        except Exception as e:
+            _record_leg("horde", horde_model, "error", started,
+                        detail=str(e))
             raise
         if looks_like_refusal(text):
             _record_leg("horde", horde_model, "refusal", started)
@@ -509,18 +517,24 @@ def _race_first_response(messages: list[dict], max_tokens: int,
                     p, model, messages, max_tokens, temperature,
                     timeout=30, tools=tools, on_token=None, progress=None)
             except Exception as e:
-                _record_leg(provider_name, model, "error", started)
+                _record_leg(provider_name, model, "error", started,
+                            detail=str(e))
                 last_err = e
                 continue
             tool_calls = _parse_tool_calls(msg)
             text = (msg.get("content") or "").strip()
+            # Empty first: looks_like_refusal("") is True (an empty reply
+            # is a non-answer), so this check must come before the
+            # refusal check or the branch below is unreachable — and an
+            # empty reply is a failure, not a refusal.
+            if not text and not tool_calls:
+                _record_leg(provider_name, model, "error", started,
+                            detail="empty response")
+                last_err = RuntimeError("empty response")
+                continue
             if not tool_calls and looks_like_refusal(text):
                 _record_leg(provider_name, model, "refusal", started)
                 last_err = RuntimeError("refusal")
-                continue
-            if not text and not tool_calls:
-                _record_leg(provider_name, model, "error", started)
-                last_err = RuntimeError("empty response")
                 continue
             _record_leg(provider_name, model, "ok", started)
             return (f"{provider_name}/{model}", text, tool_calls, msg)
@@ -532,8 +546,9 @@ def _race_first_response(messages: list[dict], max_tokens: int,
             msg = pollinations_chat(messages, max_tokens, temperature, timeout=45,
                                     tools=tools, retries=2, progress=None,
                                     on_token=None)
-        except Exception:
-            _record_leg("pollinations", POLLINATIONS_MODEL, "error", started)
+        except Exception as e:
+            _record_leg("pollinations", POLLINATIONS_MODEL, "error", started,
+                        detail=str(e))
             raise
         tool_calls = _parse_tool_calls(msg)
         text = msg.get("content") or ""
@@ -669,7 +684,8 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
         if progress:
             progress("Pollinations refused — final Horde retry…")
     except Exception as e:
-        _record_leg("pollinations", POLLINATIONS_MODEL, "error", _poll_started)
+        _record_leg("pollinations", POLLINATIONS_MODEL, "error", _poll_started,
+                    detail=str(e))
         logger.warning("pollinations failed: %s", e)
         if progress:
             progress(f"Pollinations failed ({e}) — final Horde retry…")
@@ -690,7 +706,8 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
                         _retry_started)
         return text, label, [], None, streamed
     except Exception as e:
-        _record_leg("horde", preferred_model or "auto", "error", _retry_started)
+        _record_leg("horde", preferred_model or "auto", "error", _retry_started,
+                    detail=str(e))
         raise RuntimeError(f"all model legs failed (horde, pollinations, "
                            f"horde-retry; last: {e})") from e
 
@@ -741,19 +758,24 @@ def _omni_leg(messages: list[dict], max_tokens: int, temperature: float,
                 p, model, messages, max_tokens, temperature,
                 timeout=45, tools=tools, on_token=None, progress=progress)
         except Exception as e:
-            _record_leg(p.name, model, "error", started)
+            _record_leg(p.name, model, "error", started, detail=str(e))
             logger.warning("omni %s/%s failed: %s", p.name, model, e)
             if progress:
                 progress(f"{p.label} failed — trying next provider…")
             continue
         tool_calls = _parse_tool_calls(msg)
         text = (msg.get("content") or "").strip()
+        # Empty first: looks_like_refusal("") is True (an empty reply is
+        # a non-answer), so this check must come before the refusal check
+        # or the branch below is unreachable — and an empty reply is a
+        # failure, not a refusal.
+        if not text and not tool_calls:
+            _record_leg(p.name, model, "error", started,
+                        detail="empty response")
+            continue
         if not tool_calls and looks_like_refusal(text):
             _record_leg(p.name, model, "refusal", started)
             logger.info("omni %s/%s refused; trying next", p.name, model)
-            continue
-        if not text and not tool_calls:
-            _record_leg(p.name, model, "error", started)
             continue
         _record_leg(p.name, model, "ok", started)
         return text, f"{p.name}/{model}", tool_calls, msg

@@ -190,3 +190,82 @@ def test_health_counts_stale_legs():
     h = rs_mod.health()
     assert h["legs"] == 2
     assert h["stale_legs"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Last error: the most recent failure reason per leg
+# ---------------------------------------------------------------------------
+
+def test_error_detail_recorded():
+    rs.record("kilo", "m", "error", 50, detail="kilo HTTP 429: slow down")
+    (row,) = rs.snapshot()
+    assert row["errors"] == 1
+    assert row["last_error"] == "kilo HTTP 429: slow down"
+    assert row["last_error_at"] is not None
+
+
+def test_error_detail_truncated():
+    rs.record("kilo", "m", "error", 50, detail="x" * 500)
+    (row,) = rs.snapshot()
+    assert len(row["last_error"]) == rs.LAST_ERROR_CAP
+
+
+def test_error_without_detail_is_null():
+    rs.record("kilo", "m", "error", 50)
+    (row,) = rs.snapshot()
+    assert row["last_error"] is None
+    assert row["last_error_at"] is None
+
+
+def test_ok_clears_last_error():
+    rs.record("kilo", "m", "error", 50, detail="kilo HTTP 429: slow down")
+    rs.record("kilo", "m", "ok", 10)
+    (row,) = rs.snapshot()
+    assert row["errors"] == 1 and row["successes"] == 1
+    assert row["last_error"] is None
+    assert row["last_error_at"] is None
+
+
+def test_refusal_keeps_last_error():
+    rs.record("kilo", "m", "error", 50, detail="kilo HTTP 429: slow down")
+    rs.record("kilo", "m", "refusal", 50)
+    (row,) = rs.snapshot()
+    assert row["last_error"] == "kilo HTTP 429: slow down"
+
+
+def test_error_without_detail_keeps_previous_reason():
+    rs.record("kilo", "m", "error", 50, detail="kilo HTTP 429: slow down")
+    rs.record("kilo", "m", "error", 50)
+    (row,) = rs.snapshot()
+    assert row["errors"] == 2
+    assert row["last_error"] == "kilo HTTP 429: slow down"
+
+
+def test_latest_error_replaces_older_one():
+    rs.record("kilo", "m", "error", 50, detail="first failure")
+    rs.record("kilo", "m", "error", 50, detail="second failure")
+    (row,) = rs.snapshot()
+    assert row["last_error"] == "second failure"
+
+
+def test_last_error_migrates_old_db(tmp_path, monkeypatch):
+    # A DB created before the last_error columns existed gains them in
+    # place: recording an error against it must work, not crash.
+    import sqlite3
+    old_db = str(tmp_path / "old-stats.db")
+    c = sqlite3.connect(old_db)
+    c.execute("""CREATE TABLE router_stats
+                 (provider TEXT, model TEXT,
+                  attempts INTEGER DEFAULT 0,
+                  successes INTEGER DEFAULT 0,
+                  refusals INTEGER DEFAULT 0,
+                  errors INTEGER DEFAULT 0,
+                  total_ms INTEGER DEFAULT 0,
+                  last_ok REAL, last_seen REAL,
+                  PRIMARY KEY (provider, model))""")
+    c.commit()
+    c.close()
+    monkeypatch.setattr(rs, "DB", old_db)
+    rs.record("kilo", "m", "error", 50, detail="kilo HTTP 500: boom")
+    (row,) = rs.snapshot()
+    assert row["last_error"] == "kilo HTTP 500: boom"

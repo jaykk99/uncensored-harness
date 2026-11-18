@@ -218,3 +218,83 @@ def test_retryable_statuses_cover_rate_limits():
 
 def test_pollinations_endpoint_is_openai_compatible():
     assert models.POLLINATIONS_URL.endswith("/chat/completions")
+
+
+# ---------------------------------------------------------------------------
+# _record_leg / _omni_leg: error detail reaches router_stats.last_error
+# ---------------------------------------------------------------------------
+
+def test_record_leg_passes_error_detail(tmp_path, monkeypatch):
+    import time
+    from app import router_stats as rs
+    monkeypatch.setattr(rs, "DB", str(tmp_path / "stats.db"))
+    models._record_leg("kilo", "m1", "error", time.time(),
+                       detail="kilo HTTP 429: slow down")
+    (row,) = rs.snapshot()
+    assert row["errors"] == 1
+    assert row["last_error"] == "kilo HTTP 429: slow down"
+
+
+def test_omni_leg_records_provider_error_detail(tmp_path, monkeypatch):
+    from app import router_stats as rs
+    monkeypatch.setattr(rs, "DB", str(tmp_path / "stats.db"))
+    import app.providers as providers_mod
+
+    class FakeProvider:
+        name = "groq"
+        label = "Groq"
+
+    monkeypatch.setattr(providers_mod, "omni_chain",
+                        lambda *a, **k: [(FakeProvider(), "m1")])
+
+    def boom(p, model, *a, **k):
+        raise RuntimeError("groq HTTP 401: bad key")
+
+    monkeypatch.setattr(providers_mod, "call_provider", boom)
+    assert models._omni_leg([], 10, 0.7, None, None, "") is None
+    (row,) = rs.snapshot()
+    assert row["provider"] == "groq" and row["errors"] == 1
+    assert row["last_error"] == "groq HTTP 401: bad key"
+
+
+def test_omni_leg_empty_response_records_reason(tmp_path, monkeypatch):
+    # An empty reply is a failure, not a refusal: it reaches the
+    # empty-response error branch, and the reason is stored.
+    from app import router_stats as rs
+    monkeypatch.setattr(rs, "DB", str(tmp_path / "stats.db"))
+    import app.providers as providers_mod
+
+    class FakeProvider:
+        name = "kilo"
+        label = "Kilo"
+
+    monkeypatch.setattr(providers_mod, "omni_chain",
+                        lambda *a, **k: [(FakeProvider(), "m1")])
+    monkeypatch.setattr(providers_mod, "call_provider",
+                        lambda *a, **k: {"content": ""})
+    assert models._omni_leg([], 10, 0.7, None, None, "") is None
+    (row,) = rs.snapshot()
+    assert row["errors"] == 1
+    assert row["last_error"] == "empty response"
+
+
+def test_omni_leg_refusal_still_refusal_not_error(tmp_path, monkeypatch):
+    # The reorder above must not reclassify real refusals: a reply with
+    # refusal language still counts as a refusal, with no last_error.
+    from app import router_stats as rs
+    monkeypatch.setattr(rs, "DB", str(tmp_path / "stats.db"))
+    import app.providers as providers_mod
+
+    class FakeProvider:
+        name = "kilo"
+        label = "Kilo"
+
+    monkeypatch.setattr(providers_mod, "omni_chain",
+                        lambda *a, **k: [(FakeProvider(), "m1")])
+    monkeypatch.setattr(
+        providers_mod, "call_provider",
+        lambda *a, **k: {"content": "I'm sorry, I can't help with that."})
+    assert models._omni_leg([], 10, 0.7, None, None, "") is None
+    (row,) = rs.snapshot()
+    assert row["refusals"] == 1 and row["errors"] == 0
+    assert row["last_error"] is None

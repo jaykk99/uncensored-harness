@@ -97,7 +97,7 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `GET /api/probe/history` — last probe verdict per model + recent runs (recorded automatically by every probe run; `limit` caps the runs, default 20)
 - `GET /api/probe/history/{run_id}` — one past run with its full per-model results (404 when unknown or pruned)
 - `POST /api/probe/history/clear` — wipe probe history (`{access_code}`)
-- `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, avg/p50/p95 ms latency, `stale` flag when no data in 24h)
+- `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, avg/p50/p95 ms latency, `stale` flag when no data in 24h, plus `last_error`/`last_error_at`: the most recent failure reason per leg — a 429, a bad key, a timeout — shown in the System tab's router-health table next to the error count; a later success clears it)
 - `GET /api/models` — model list grouped by provider, with live key status
 - `GET /api/threads` — list threads (access_code, archived=true for the archive view; `limit` + `before_id` cursor page past the 50 cap — response is `{"threads", "total", "has_more", "next_before_id"}`, newest first, pinned on top, so the sidebar's "Show older chats" button reaches every older chat)
 - `GET /api/threads/search?q=` — search thread titles and message content (returns a match snippet per thread)
@@ -136,7 +136,7 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-388 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, probe history, router stats, and thread reopen/delete/rename/search/message-prune/message-edit/in-thread-search/global-message-search/search-paging/thread-instructions/thread-list-paging. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
+405 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, probe history, router stats, and thread reopen/delete/rename/search/message-prune/message-edit/in-thread-search/global-message-search/search-paging/thread-instructions/thread-list-paging. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
 
 ## Architecture
 
@@ -148,7 +148,7 @@ app/models.py       routing: race -> omni -> pollinations -> horde retry
 app/providers.py    provider table + omni_chain (uncensored-first ordering)
 app/probe.py        per-model refusal probe suite (+ CLI)
 app/probe_history.py persisted probe verdicts: last result per model + runs
-app/router_stats.py sqlite leg-health tracking
+app/router_stats.py sqlite leg-health tracking (incl. last failure reason per leg)
 app/integrations.py native GitHub/GitLab/Gmail/Vercel/Fal REST clients
 app/tools.py        agent tool registry (shell, files, web, browser, integrations)
 app/guards.py       hard-boundary pre-check (tiny by design — legit work passes)

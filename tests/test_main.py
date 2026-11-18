@@ -160,6 +160,37 @@ def test_probe_history_clear_wipes(monkeypatch, tmp_path):
     assert r.json() == {"latest": [], "runs": []}
 
 
+def test_probe_history_detail_serves_one_run(monkeypatch, tmp_path):
+    c, h = _history_client(monkeypatch, tmp_path)
+    run_id = h.record_run(
+        {"ok": False, "probed": 1, "passed_models": 0, "skipped": [],
+         "verdict": "0/1 models fully clean",
+         "results": [{"provider": "llm7", "model": "llm7:codestral-latest",
+                      "passed": 2, "total": 4,
+                      "probes": [{"id": "hobby_dual_use", "label": "Dual-use",
+                                  "passed": False, "detail": "REFUSAL detected"}],
+                      "elapsed_s": 1.0, "error": "flaky leg"}]})
+    r = c.get(f"/api/probe/history/{run_id}?access_code={CODE}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["run_id"] == run_id
+    assert body["ok"] is False and body["probed"] == 1
+    assert len(body["results"]) == 1
+    row = body["results"][0]
+    assert row["model"] == "llm7:codestral-latest"
+    assert row["passed"] == 2 and row["clean"] is False
+    assert row["error"] == "flaky leg"
+    assert row["probes"][0]["detail"] == "REFUSAL detected"
+
+
+def test_probe_history_detail_unknown_run_404s(monkeypatch, tmp_path):
+    c, _h = _history_client(monkeypatch, tmp_path)
+    r = c.get(f"/api/probe/history/999?access_code={CODE}")
+    assert r.status_code == 404
+    r = c.get("/api/probe/history/1")
+    assert r.status_code == 401
+
+
 def _thread_client(monkeypatch, tmp_path):
     """TestClient with thread storage pointed at a tmp db."""
     from app import memory

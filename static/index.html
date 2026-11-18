@@ -2502,8 +2502,51 @@ async function loadProbeList() {
       try {
         const h2 = await (await fetch("/api/probe/history?access_code=" + encodeURIComponent(AC))).json();
         (h2.latest || []).forEach(l => { lastByModel[l.model] = l; });
+        renderRuns(h2.runs || []);
       } catch (e) { /* keep the stale lines; the fresh run is on screen */ }
     };
+    // Recent runs: the audit trail behind the last-verdict lines.
+    // Each run expands to the per-model verdicts it recorded, so a
+    // past failure can be inspected without re-running the slow suite.
+    const runsBox = document.createElement("div");
+    const renderRuns = (runs) => {
+      if (!runs || !runs.length) { runsBox.innerHTML = ""; return; }
+      let h = `<div style="margin-top:14px"><b>Recent probe runs</b></div>`;
+      runs.forEach(r => {
+        const when = r.started ? new Date(r.started * 1000).toLocaleString() : "";
+        const scope = r.provider ? ` · ${esc(r.provider)}` : (r.model_filter ? ` · ${esc(r.model_filter)}` : "");
+        h += `<div class="prow"><span class="pname"><span class="${r.ok ? "pass" : "fail"}">${r.ok ? "PASS" : "FAIL"}</span>` +
+          `<span class="pmeta"> ${r.passed_models}/${r.probed} models clean${scope} · ${esc(when)}</span></span>` +
+          `<button class="pbtn" data-runbtn="${r.run_id}">Details</button></div>` +
+          `<div class="presults" style="display:none" data-rundetail="${r.run_id}"></div>`;
+      });
+      runsBox.innerHTML = h;
+      runsBox.querySelectorAll("[data-runbtn]").forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.getAttribute("data-runbtn");
+          const detail = runsBox.querySelector(`[data-rundetail="${id}"]`);
+          if (detail.style.display !== "none") { detail.style.display = "none"; btn.textContent = "Details"; return; }
+          btn.disabled = true; btn.textContent = "Loading...";
+          try {
+            const d = await (await fetch("/api/probe/history/" + id + "?access_code=" + encodeURIComponent(AC))).json();
+            let hh = "";
+            (d.results || []).forEach(m => {
+              const ok = m.passed === m.total;
+              hh += `<div class="presult"><span class="${ok ? "pass" : "fail"}">${ok ? "PASS" : "FAIL"}</span>` +
+                `<span class="mid">${esc(m.model.split(":").slice(1).join(":"))}</span>` +
+                `<span class="pmeta">${m.passed}/${m.total}${m.error ? " — " + esc(m.error.slice(0, 80)) : ""}</span></div>`;
+            });
+            detail.innerHTML = hh || `<div class="sysempty">no per-model results recorded for this run</div>`;
+            detail.style.display = ""; btn.textContent = "Hide";
+          } catch (e) {
+            detail.innerHTML = `<div class="sysempty">failed to load run: ${esc(String(e))}</div>`;
+            detail.style.display = ""; btn.textContent = "Hide";
+          }
+          btn.disabled = false;
+        };
+      });
+    };
+    renderRuns(hist.runs || []);
     groups.forEach(g => {
       const live = g.items.filter(m => m.live).length;
       const row = document.createElement("div");
@@ -2535,6 +2578,7 @@ async function loadProbeList() {
       };
       box.appendChild(row);
     });
+    box.appendChild(runsBox);
     const clearRow = document.createElement("div");
     clearRow.innerHTML = `<div style="margin-top:10px"><button class="pbtn" id="phistclear">Clear probe history</button> <span class="note">clears saved verdicts (e.g. after a provider outage is fixed)</span></div>`;
     box.appendChild(clearRow);

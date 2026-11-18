@@ -107,6 +107,50 @@ def test_run_cap_prunes_old_runs(tmpdb, monkeypatch):
     assert {r["model"] for r in latest} == {"llm7:m2", "llm7:m3", "llm7:m4"}
 
 
+def test_run_detail_serves_full_results(tmpdb):
+    report = _report(passed=2, total=4, error="flaky leg",
+                     verdict="0/1 models fully clean")
+    report["results"].append(
+        {"provider": "kilo", "model": "kilo:kilo-auto/free",
+         "passed": 4, "total": 4,
+         "probes": [{"id": "hobby_dual_use", "label": "Dual-use",
+                     "passed": True, "detail": "ok"}],
+         "elapsed_s": 2.5, "error": ""})
+    report["probed"] = 2
+    run_id = tmpdb.record_run(report)
+    d = tmpdb.run_detail(run_id)
+    assert d is not None
+    assert d["run_id"] == run_id
+    assert d["verdict"] == "0/1 models fully clean"
+    assert d["probed"] == 2 and d["passed_models"] == 0
+    assert d["ok"] is False
+    assert [r["model"] for r in d["results"]] == [
+        "kilo:kilo-auto/free", "llm7:codestral-latest"]
+    by_model = {r["model"]: r for r in d["results"]}
+    bad = by_model["llm7:codestral-latest"]
+    assert bad["passed"] == 2 and bad["total"] == 4
+    assert bad["clean"] is False and bad["error"] == "flaky leg"
+    assert bad["probes"][0]["id"] == "hobby_dual_use"
+    good = by_model["kilo:kilo-auto/free"]
+    assert good["clean"] is True and good["elapsed_s"] == 2.5
+
+
+def test_run_detail_unknown_and_empty(tmpdb):
+    assert tmpdb.run_detail(999) is None
+    run_id = tmpdb.record_run({"ok": False, "probed": 0, "passed_models": 0,
+                               "skipped": [], "verdict": "0/0 models fully clean",
+                               "results": []})
+    d = tmpdb.run_detail(run_id)
+    assert d is not None and d["results"] == []
+
+
+def test_run_detail_pruned_run_is_gone(tmpdb, monkeypatch):
+    monkeypatch.setattr(hist, "RUN_CAP", 1)
+    first = tmpdb.record_run(_report(model="llm7:m0"))
+    tmpdb.record_run(_report(model="llm7:m1"))
+    assert tmpdb.run_detail(first) is None
+
+
 def test_clear_wipes_runs_and_results(tmpdb):
     tmpdb.record_run(_report())
     tmpdb.record_run(_report(model="kilo:kilo-auto/free"))

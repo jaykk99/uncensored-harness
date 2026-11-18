@@ -6,6 +6,7 @@ Endpoints:
   GET  /api/self-test     — refusal-probe verification (access_code)
   GET  /api/probe         — per-model probe suite (slow)
   GET  /api/probe/history — last probe verdict per model + recent runs
+  GET  /api/probe/history/{run_id} — one past run, full per-model results
   POST /api/probe/history/clear — wipe probe history
   GET  /api/router-stats  — per-leg health (attempts, success rate,
     refusals, errors, avg/p50/p95 ms latency, `stale` flag)
@@ -210,6 +211,23 @@ def probe_history(access_code: str = "", limit: int = 20):
     limit = max(1, min(limit, 50))
     return {"latest": history_mod.latest_per_model(),
             "runs": history_mod.recent_runs(limit=limit)}
+
+
+@app.get("/api/probe/history/{run_id}")
+def probe_history_detail(run_id: int, access_code: str = ""):
+    """One recorded probe run with its full per-model results.
+
+    The history list only carries tallies (probed/passed_models), so
+    answering "which model failed in Tuesday's run, and on which
+    probe?" needs this: the run row plus every model's verdicts.
+    404 when the run id is unknown or was pruned past RUN_CAP.
+    """
+    _check_access(access_code)
+    from . import probe_history as history_mod
+    detail = history_mod.run_detail(run_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="unknown probe run")
+    return detail
 
 
 @app.post("/api/probe/history/clear")

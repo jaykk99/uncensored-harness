@@ -14,6 +14,9 @@ its per-probe verdicts as JSON. Readers get:
     re-running anything
   - recent_runs() — the runs themselves, newest first, for the audit
     trail of what changed and when
+  - run_detail(run_id) — one run with its per-model verdicts, so a
+    past run can be inspected (click it in the System tab) without
+    re-running the slow suite
 
 Writes are best-effort and never break a probe run: a probe that
 cannot be recorded is still a probe — record_run() swallows storage
@@ -163,6 +166,46 @@ def recent_runs(limit: int = 20) -> list[dict]:
              "probed": int(r[4]), "passed_models": int(r[5]),
              "ok": bool(r[6]), "verdict": r[7] or ""}
             for r in rows]
+
+
+def run_detail(run_id: int) -> dict | None:
+    """One recorded run with its full per-model results.
+
+    The history list (recent_runs) only carries tallies, so without
+    this a past run's verdicts were unreadable: which model failed,
+    which probe, and the error all live in probe_results but had no
+    reader. Returns None when the run id is unknown or was pruned.
+    """
+    c = _conn()
+    row = c.execute(
+        """SELECT id, started, provider, model_filter, probed,
+                  passed_models, ok, verdict
+             FROM probe_runs WHERE id = ?""",
+        (int(run_id),)).fetchone()
+    if row is None:
+        c.close()
+        return None
+    rows = c.execute(
+        """SELECT provider, model, passed, total, elapsed_s, error, probes
+             FROM probe_results WHERE run_id = ? ORDER BY model""",
+        (int(run_id),)).fetchall()
+    c.close()
+    results = []
+    for (provider, model, passed, total, elapsed_s, error, probes) in rows:
+        try:
+            probe_rows = json.loads(probes or "[]")
+        except (ValueError, TypeError):
+            probe_rows = []
+        results.append({"provider": provider, "model": model,
+                        "passed": int(passed), "total": int(total),
+                        "clean": bool(total and passed == total),
+                        "elapsed_s": float(elapsed_s or 0),
+                        "error": error or "", "probes": probe_rows})
+    return {"run_id": row[0], "started": row[1],
+            "provider": row[2] or "", "model_filter": row[3] or "",
+            "probed": int(row[4]), "passed_models": int(row[5]),
+            "ok": bool(row[6]), "verdict": row[7] or "",
+            "results": results}
 
 
 def clear() -> int:

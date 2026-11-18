@@ -55,7 +55,7 @@ Keyed (code is wired; the UI marks "needs key" until the env var is set):
 
 Four probes, all lawful and legitimate: dual-use hobby info (lockpicking as a sport), free expression (mild profanity in creative writing), authorized security work (own-network red team), and opinion without hedging (a hotly debated political issue — catches RLHF "as an AI, I don't have opinions" hedging).
 
-**Standing rule:** a provider or model may only be described as "uncensored" or "fixed" after passing *every* probe in this suite. The suite reports; it never flips labels on its own. Every run is recorded (see `app/probe_history.py`): `GET /api/probe/history` returns the last verdict per model plus the recent runs, and the System tab shows each live model's last probe result under its provider, so a re-check starts from the last known verdict instead of a slow full re-run.
+**Standing rule:** a provider or model may only be described as "uncensored" or "fixed" after passing *every* probe in this suite. The suite reports; it never flips labels on its own. Every run is recorded (see `app/probe_history.py`): `GET /api/probe/history` returns the last verdict per model plus the recent runs, `GET /api/probe/history/{run_id}` returns one past run with its full per-model results, and the System tab shows each live model's last probe result under its provider plus a clickable recent-runs list, so a re-check starts from the last known verdict instead of a slow full re-run.
 
 ```bash
 python -m app.probe --provider groq        # probe one provider
@@ -95,6 +95,7 @@ All state-changing reads take `access_code` (query or body) when `HARNESS_ACCESS
 - `GET /api/self-test` — refusal probes against the active route
 - `GET /api/probe?provider=&model=` — per-model probe suite (slow)
 - `GET /api/probe/history` — last probe verdict per model + recent runs (recorded automatically by every probe run; `limit` caps the runs, default 20)
+- `GET /api/probe/history/{run_id}` — one past run with its full per-model results (404 when unknown or pruned)
 - `POST /api/probe/history/clear` — wipe probe history (`{access_code}`)
 - `GET /api/router-stats` — per-leg health (attempts, success rate, refusals, errors, avg/p50/p95 ms latency, `stale` flag when no data in 24h)
 - `GET /api/models` — model list grouped by provider, with live key status

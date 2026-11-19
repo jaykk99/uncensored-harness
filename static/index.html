@@ -2486,17 +2486,51 @@ async function loadProbeList() {
     const renderLast = (row, g) => {
       const el = row.querySelector(".plast");
       let h = "";
+      // Probed models in display order, so the History buttons wired
+      // below (by index) line up with the right model id — ids carry
+      // ":" and "/" and are never stuffed into an HTML attribute.
+      const probed = [];
       g.items.filter(m => m.live).forEach(m => {
         const l = lastByModel[m.id];
         const short = esc(m.id.split(":").slice(1).join(":"));
         if (!l) { h += `<div class="presult"><span class="pmeta">${short} — not probed yet</span></div>`; return; }
+        probed.push(m);
         const ok = l.passed === l.total;
         const when = l.probed_at ? new Date(l.probed_at * 1000).toLocaleString() : "";
         h += `<div class="presult"><span class="${ok ? "pass" : "fail"}">${ok ? "PASS" : "FAIL"}</span>` +
           `<span class="mid">${short}</span>` +
-          `<span class="pmeta">last probe ${l.passed}/${l.total}${l.error ? " — " + esc(l.error.slice(0, 80)) : ""} · ${esc(when)}</span></div>`;
+          `<span class="pmeta">last probe ${l.passed}/${l.total}${l.error ? " — " + esc(l.error.slice(0, 80)) : ""} · ${esc(when)}</span>` +
+          `<button class="pbtn" data-mhist>History</button></div>` +
+          `<div class="presults" style="display:none" data-mhistdetail></div>`;
       });
       el.innerHTML = h;
+      // Per-model history: every recorded verdict for that model,
+      // newest first, so a model that was clean and now fails shows
+      // when it changed instead of only its latest line.
+      el.querySelectorAll("[data-mhist]").forEach((btn, i) => {
+        const m = probed[i];
+        const detail = el.querySelectorAll("[data-mhistdetail]")[i];
+        btn.onclick = async () => {
+          if (detail.style.display !== "none") { detail.style.display = "none"; btn.textContent = "History"; return; }
+          btn.disabled = true; btn.textContent = "Loading...";
+          try {
+            const d = await (await fetch("/api/probe/history/model?model=" + encodeURIComponent(m.id) + "&access_code=" + encodeURIComponent(AC))).json();
+            let hh = "";
+            (d.history || []).forEach(row => {
+              const ok = row.passed === row.total;
+              const when = row.probed_at ? new Date(row.probed_at * 1000).toLocaleString() : "";
+              hh += `<div class="presult"><span class="${ok ? "pass" : "fail"}">${ok ? "PASS" : "FAIL"}</span>` +
+                `<span class="pmeta">${row.passed}/${row.total}${row.error ? " — " + esc(row.error.slice(0, 80)) : ""} · ${esc(when)}</span></div>`;
+            });
+            detail.innerHTML = hh || `<div class="sysempty">no recorded verdicts for this model</div>`;
+            detail.style.display = ""; btn.textContent = "Hide";
+          } catch (e) {
+            detail.innerHTML = `<div class="sysempty">failed to load history: ${esc(String(e))}</div>`;
+            detail.style.display = ""; btn.textContent = "Hide";
+          }
+          btn.disabled = false;
+        };
+      });
     };
     const refreshHistory = async () => {
       try {

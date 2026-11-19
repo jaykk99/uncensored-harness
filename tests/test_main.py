@@ -191,6 +191,44 @@ def test_probe_history_detail_unknown_run_404s(monkeypatch, tmp_path):
     assert r.status_code == 401
 
 
+def test_probe_history_model_serves_trend(monkeypatch, tmp_path):
+    c, h = _history_client(monkeypatch, tmp_path)
+    for passed in (4, 0, 2):
+        h.record_run({"ok": passed == 4, "probed": 1,
+                      "passed_models": 1 if passed == 4 else 0, "skipped": [],
+                      "verdict": f"{passed}/4 probes",
+                      "results": [{"provider": "llm7",
+                                   "model": "llm7:codestral-latest",
+                                   "passed": passed, "total": 4,
+                                   "probes": [{"id": "hobby_dual_use",
+                                               "label": "Dual-use",
+                                               "passed": passed == 4,
+                                               "detail": "ok"}],
+                                   "elapsed_s": 1.0, "error": ""}]})
+    r = c.get("/api/probe/history/model?model=llm7%3Acodestral-latest"
+              f"&access_code={CODE}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == "llm7:codestral-latest"
+    assert [row["passed"] for row in body["history"]] == [2, 0, 4]
+    assert [row["clean"] for row in body["history"]] == [False, False, True]
+    assert body["history"][0]["probes"][0]["id"] == "hobby_dual_use"
+    r = c.get("/api/probe/history/model?model=llm7%3Acodestral-latest"
+              f"&limit=1&access_code={CODE}")
+    assert len(r.json()["history"]) == 1
+
+
+def test_probe_history_model_404_and_gates(monkeypatch, tmp_path):
+    c, _h = _history_client(monkeypatch, tmp_path)
+    r = c.get("/api/probe/history/model?model=never%3Aprobed"
+              f"&access_code={CODE}")
+    assert r.status_code == 404
+    r = c.get(f"/api/probe/history/model?access_code={CODE}")
+    assert r.status_code == 400
+    r = c.get("/api/probe/history/model?model=llm7%3Ax")
+    assert r.status_code == 401
+
+
 def _thread_client(monkeypatch, tmp_path):
     """TestClient with thread storage pointed at a tmp db."""
     from app import memory

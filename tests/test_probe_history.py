@@ -151,6 +151,59 @@ def test_run_detail_pruned_run_is_gone(tmpdb, monkeypatch):
     assert tmpdb.run_detail(first) is None
 
 
+def test_model_history_newest_first_across_runs(tmpdb):
+    tmpdb.record_run(_report(passed=4, total=4))
+    tmpdb.record_run(_report(passed=0, total=4, error="now refusing",
+                             verdict="0/1 models fully clean"))
+    tmpdb.record_run(_report(passed=2, total=4, error="flaky",
+                             verdict="0/1 models fully clean"))
+    rows = tmpdb.model_history("llm7:codestral-latest")
+    assert len(rows) == 3
+    assert [r["passed"] for r in rows] == [2, 0, 4]
+    assert [r["clean"] for r in rows] == [False, False, True]
+    assert rows[0]["error"] == "flaky"
+    assert rows[1]["error"] == "now refusing"
+    assert rows[0]["run_id"] > rows[1]["run_id"] > rows[2]["run_id"]
+    assert rows[0]["probed_at"] >= rows[1]["probed_at"] >= rows[2]["probed_at"]
+    assert rows[0]["probes"][0]["id"] == "hobby_dual_use"
+    assert rows[0]["model"] == "llm7:codestral-latest"
+
+
+def test_model_history_only_that_model(tmpdb):
+    tmpdb.record_run(_report(model="llm7:model-a", passed=4))
+    other = _report(model="kilo:kilo-auto/free", passed=2, total=4,
+                    verdict="1/2 models fully clean")
+    other["probed"] = 1
+    other["passed_models"] = 0
+    other["ok"] = False
+    tmpdb.record_run(other)
+    tmpdb.record_run(_report(model="llm7:model-a", passed=0, total=4,
+                             error="broke", verdict="0/1 models fully clean"))
+    rows = tmpdb.model_history("llm7:model-a")
+    assert len(rows) == 2
+    assert all(r["model"] == "llm7:model-a" for r in rows)
+    assert [r["passed"] for r in rows] == [0, 4]
+    assert tmpdb.model_history("kilo:kilo-auto/free")[0]["passed"] == 2
+
+
+def test_model_history_limit_and_unknown(tmpdb):
+    for _ in range(5):
+        tmpdb.record_run(_report(passed=4))
+    assert len(tmpdb.model_history("llm7:codestral-latest", limit=2)) == 2
+    assert len(tmpdb.model_history("llm7:codestral-latest", limit=0)) == 1
+    assert len(tmpdb.model_history("llm7:codestral-latest", limit=999)) == 5
+    assert tmpdb.model_history("never:probed") == []
+
+
+def test_model_history_pruned_runs_are_gone(tmpdb, monkeypatch):
+    monkeypatch.setattr(hist, "RUN_CAP", 1)
+    tmpdb.record_run(_report(passed=4))
+    tmpdb.record_run(_report(passed=0, total=4, error="broke",
+                             verdict="0/1 models fully clean"))
+    rows = tmpdb.model_history("llm7:codestral-latest")
+    assert len(rows) == 1 and rows[0]["passed"] == 0
+
+
 def test_clear_wipes_runs_and_results(tmpdb):
     tmpdb.record_run(_report())
     tmpdb.record_run(_report(model="kilo:kilo-auto/free"))

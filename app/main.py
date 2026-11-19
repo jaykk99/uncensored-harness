@@ -213,6 +213,31 @@ def probe_history(access_code: str = "", limit: int = 20):
             "runs": history_mod.recent_runs(limit=limit)}
 
 
+@app.get("/api/probe/history/model")
+def probe_history_model(model: str = "", access_code: str = "",
+                        limit: int = 20):
+    """One model's probe verdicts across runs, newest first.
+
+    The history list only answers "what did we last see for this
+    model" — this is the trend behind that line: every recorded run
+    that probed this exact model id, so the System tab's per-model
+    History toggle can show when a model went from clean to failing
+    (or back). 400 when no model id is given, 404 when the model was
+    never probed or its runs were pruned. Defined above the
+    /api/probe/history/{run_id} route so "model" is never read as a
+    run id.
+    """
+    _check_access(access_code)
+    if not model.strip():
+        raise HTTPException(status_code=400, detail="model required")
+    from . import probe_history as history_mod
+    rows = history_mod.model_history(model, limit=limit)
+    if not rows:
+        raise HTTPException(status_code=404,
+                            detail="model never probed")
+    return {"model": model, "history": rows}
+
+
 @app.get("/api/probe/history/{run_id}")
 def probe_history_detail(run_id: int, access_code: str = ""):
     """One recorded probe run with its full per-model results.

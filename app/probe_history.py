@@ -17,6 +17,9 @@ its per-probe verdicts as JSON. Readers get:
   - run_detail(run_id) — one run with its per-model verdicts, so a
     past run can be inspected (click it in the System tab) without
     re-running the slow suite
+  - model_history(model) — one model's verdicts across runs, newest
+    first, so a model that was clean last week and fails now shows
+    *when* it changed instead of only its latest verdict
 
 Writes are best-effort and never break a probe run: a probe that
 cannot be recorded is still a probe — record_run() swallows storage
@@ -206,6 +209,46 @@ def run_detail(run_id: int) -> dict | None:
             "probed": int(row[4]), "passed_models": int(row[5]),
             "ok": bool(row[6]), "verdict": row[7] or "",
             "results": results}
+
+
+def model_history(model: str, limit: int = 20) -> list[dict]:
+    """One model's verdicts across runs, newest first.
+
+    latest_per_model() only answers "what did we last see" — a model
+    that passed last week and fails today looks identical to one that
+    always failed. This is the trend behind that line: every recorded
+    run that probed this exact model id, with its per-probe verdicts
+    and when it ran, so the System tab's per-model History toggle can
+    show when a model changed. Empty list when the model was never
+    probed (or its runs were pruned past RUN_CAP). `limit` clamps
+    like the other paged readers.
+    """
+    limit = max(1, min(limit, 50))
+    c = _conn()
+    rows = c.execute(
+        """SELECT pr.provider, pr.passed, pr.total, pr.elapsed_s,
+                  pr.error, pr.probes, pr.run_id, r.started
+             FROM probe_results pr
+             JOIN probe_runs r ON r.id = pr.run_id
+            WHERE pr.model = ?
+            ORDER BY pr.run_id DESC LIMIT ?""",
+        (str(model), limit)).fetchall()
+    c.close()
+    out = []
+    for (provider, passed, total, elapsed_s, error, probes,
+         run_id, started) in rows:
+        try:
+            probe_rows = json.loads(probes or "[]")
+        except (ValueError, TypeError):
+            probe_rows = []
+        out.append({"provider": provider, "model": str(model),
+                    "passed": int(passed), "total": int(total),
+                    "clean": bool(total and passed == total),
+                    "elapsed_s": float(elapsed_s or 0),
+                    "error": error or "",
+                    "probes": probe_rows,
+                    "probed_at": started, "run_id": run_id})
+    return out
 
 
 def clear() -> int:

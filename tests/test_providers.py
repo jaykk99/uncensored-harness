@@ -260,3 +260,356 @@ def test_pollinations_fallback_present():
 def test_never_routes_rlhf_refusers():
     joined = " ".join(m["id"] for m in list_models()).lower()
     assert "gpt-4" not in joined and "claude" not in joined and "gemini" not in joined
+
+
+# ---------------------------------------------------------------------------
+# HTTP call paths — stubbed httpx transport, no network
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+import httpx
+
+
+def _mock_client(monkeypatch, module, handler):
+    """Replace module._client with a factory returning a MockTransport client."""
+    def factory(timeout):
+        return httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(module, "_client", factory)
+
+
+def _ok_message(content="hello", tool_calls=None):
+    msg = {"role": "assistant", "content": content}
+    if tool_calls is not None:
+        msg["tool_calls"] = tool_calls
+    return {"choices": [{"message": msg}]}
+
+
+def test_call_openai_success(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, json=_ok_message("hi there")))
+    p = get_provider("groq")
+    msg = providers.call_openai_compatible(
+        p, "openai/gpt-oss-120b", [{"role": "user", "content": "hi"}])
+    assert msg["content"] == "hi there"
+
+
+def test_call_openai_sends_key_when_set(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        seen["auth"] = req.headers.get("Authorization")
+        seen["body"] = _json.loads(req.content)
+        return httpx.Response(200, json=_ok_message("ok"))
+    _mock_client(monkeypatch, providers, handler)
+    monkeypatch.setenv("GROQ_API_KEY", "sk-abc")
+    providers.call_openai_compatible(
+        get_provider("groq"), "openai/gpt-oss-120b",
+        [{"role": "user", "content": "hi"}], max_tokens=100)
+    assert seen["auth"] == "Bearer sk-abc"
+    # max_tokens floors at 700.
+    assert seen["body"]["max_tokens"] == 700
+    assert seen["body"]["model"] == "openai/gpt-oss-120b"
+
+
+def test_call_openai_keyless_sends_no_auth(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        seen["auth"] = req.headers.get("Authorization")
+        return httpx.Response(200, json=_ok_message("ok"))
+    _mock_client(monkeypatch, providers, handler)
+    providers.call_openai_compatible(
+        get_provider("kilo"), "kilo-auto/free",
+        [{"role": "user", "content": "hi"}])
+    assert seen["auth"] is None
+
+
+def test_call_openai_tools_in_body(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = _json.loads(req.content)
+        return httpx.Response(200, json=_ok_message("ok"))
+    _mock_client(monkeypatch, providers, handler)
+    tools = [{"type": "function", "function": {"name": "web_search"}}]
+    providers.call_openai_compatible(
+        get_provider("kilo"), "kilo-auto/free",
+        [{"role": "user", "content": "hi"}], tools=tools)
+    assert seen["body"]["tools"] == tools
+    assert seen["body"]["tool_choice"] == "auto"
+
+
+def test_call_openai_reasoning_fallback(monkeypatch):
+    # Reasoning-only Kilo models put text in `reasoning`, content null.
+    body = {"choices": [{"message": {"role": "assistant", "content": None,
+                                     "reasoning": "thought out loud"}}]}
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, json=body))
+    msg = providers.call_openai_compatible(
+        get_provider("kilo"), "kilo-auto/free",
+        [{"role": "user", "content": "hi"}])
+    assert msg["content"] == "thought out loud"
+
+
+def test_call_openai_empty_choices_raises(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, json={"choices": []}))
+    with pytest.raises(RuntimeError, match="empty choices"):
+        providers.call_openai_compatible(
+            get_provider("kilo"), "kilo-auto/free",
+            [{"role": "user", "content": "hi"}])
+
+
+def test_call_openai_empty_response_raises(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, json=_ok_message("")))
+    with pytest.raises(RuntimeError, match="empty response"):
+        providers.call_openai_compatible(
+            get_provider("kilo"), "kilo-auto/free",
+            [{"role": "user", "content": "hi"}])
+
+
+def test_call_openai_empty_response_with_tool_calls_ok(monkeypatch):
+    tc = [{"id": "c1", "type": "function",
+           "function": {"name": "web_search", "arguments": "{}"}}]
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, json=_ok_message("", tc)))
+    msg = providers.call_openai_compatible(
+        get_provider("kilo"), "kilo-auto/free",
+        [{"role": "user", "content": "hi"}])
+    assert msg["tool_calls"] == tc
+
+
+def test_call_openai_retryable_status_raises(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(429, text="slow down"))
+    with pytest.raises(RuntimeError, match="kilo HTTP 429"):
+        providers.call_openai_compatible(
+            get_provider("kilo"), "kilo-auto/free",
+            [{"role": "user", "content": "hi"}])
+
+
+def test_call_openai_400_includes_body_snippet(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(400, text="bad model name"))
+    with pytest.raises(RuntimeError, match="bad model name"):
+        providers.call_openai_compatible(
+            get_provider("kilo"), "kilo-auto/free",
+            [{"role": "user", "content": "hi"}])
+
+
+def test_call_openai_streaming_via_on_token(monkeypatch):
+    sse = ('data: {"choices": [{"delta": {"content": "hel"}}]}\n\n'
+           'data: {"choices": [{"delta": {"content": "lo"}}]}\n\n'
+           'data: [DONE]\n\n')
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, content=sse.encode()))
+    seen = []
+    msg = providers.call_openai_compatible(
+        get_provider("kilo"), "kilo-auto/free",
+        [{"role": "user", "content": "hi"}], on_token=seen.append)
+    assert msg["content"] == "hello"
+    assert seen == ["hel", "lo"]
+
+
+def test_stream_accumulates_tool_calls(monkeypatch):
+    sse = (
+        'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c9", '
+        '"type": "function", "function": {"name": "web_search", "arguments": "{\\"q"}}]}}]}\n\n'
+        'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, '
+        '"function": {"arguments": "\\": \\"x\\"}"}}]}}]}\n\n'
+        'data: [DONE]\n\n')
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, content=sse.encode()))
+    msg = providers.call_openai_compatible(
+        get_provider("kilo"), "kilo-auto/free",
+        [{"role": "user", "content": "hi"}], on_token=lambda t: None)
+    assert msg["content"] == ""
+    (tc,) = msg["tool_calls"]
+    assert tc["id"] == "c9"
+    assert tc["function"]["name"] == "web_search"
+    assert tc["function"]["arguments"] == '{"q": "x"}'
+
+
+def test_stream_skips_garbage_lines_and_empty_choices(monkeypatch):
+    sse = ('event: ping\n'
+           'data: not-json{\n'
+           'data: {"choices": []}\n'
+           'data: {"choices": [{"delta": {"content": "ok"}}]}\n\n'
+           'data: [DONE]\n\n')
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, content=sse.encode()))
+    msg = providers.call_openai_compatible(
+        get_provider("kilo"), "kilo-auto/free",
+        [{"role": "user", "content": "hi"}], on_token=lambda t: None)
+    assert msg["content"] == "ok"
+
+
+def test_stream_empty_raises(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, content=b"data: [DONE]\n\n"))
+    with pytest.raises(RuntimeError, match="no content"):
+        providers.call_openai_compatible(
+            get_provider("kilo"), "kilo-auto/free",
+            [{"role": "user", "content": "hi"}], on_token=lambda t: None)
+
+
+def test_stream_retryable_status_raises(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(503, text="down"))
+    with pytest.raises(RuntimeError, match="kilo HTTP 503"):
+        providers.call_openai_compatible(
+            get_provider("kilo"), "kilo-auto/free",
+            [{"role": "user", "content": "hi"}], on_token=lambda t: None)
+
+
+def test_stream_400_raises_without_body(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(400, text="nope"))
+    with pytest.raises(RuntimeError, match="kilo HTTP 400"):
+        providers.call_openai_compatible(
+            get_provider("kilo"), "kilo-auto/free",
+            [{"role": "user", "content": "hi"}], on_token=lambda t: None)
+
+
+# ---------------------------------------------------------------------------
+# call_cohere — /v2/chat shape
+# ---------------------------------------------------------------------------
+
+def _cohere_body(text="cohere answer"):
+    return {"message": {"content": [{"type": "text", "text": text},
+                                    {"type": "other", "text": "ignored"}]}}
+
+
+def test_call_cohere_success(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = _json.loads(req.content)
+        seen["auth"] = req.headers.get("Authorization")
+        return httpx.Response(200, json=_cohere_body())
+    _mock_client(monkeypatch, providers, handler)
+    monkeypatch.setenv("COHERE_API_KEY", "co-key")
+    msg = providers.call_cohere(
+        get_provider("cohere"), "command-a-03-2025",
+        [{"role": "user", "content": "hi"}])
+    assert msg["content"] == "cohere answer"
+    assert seen["auth"] == "Bearer co-key"
+    # Messages are flattened to one user turn.
+    assert seen["body"]["messages"] == [{"role": "user", "content": "user: hi"}]
+
+
+def test_call_cohere_flattens_list_content(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = _json.loads(req.content)
+        return httpx.Response(200, json=_cohere_body())
+    _mock_client(monkeypatch, providers, handler)
+    monkeypatch.setenv("COHERE_API_KEY", "co-key")
+    providers.call_cohere(
+        get_provider("cohere"), "command-a-03-2025",
+        [{"role": "user",
+          "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}])
+    assert seen["body"]["messages"][0]["content"] == "user: a b"
+
+
+def test_call_cohere_empty_raises(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, json={"message": {"content": []}}))
+    monkeypatch.setenv("COHERE_API_KEY", "co-key")
+    with pytest.raises(RuntimeError, match="empty response"):
+        providers.call_cohere(get_provider("cohere"), "command-a-03-2025",
+                              [{"role": "user", "content": "hi"}])
+
+
+def test_call_cohere_retryable_and_400(monkeypatch):
+    monkeypatch.setenv("COHERE_API_KEY", "co-key")
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(429, text="slow"))
+    with pytest.raises(RuntimeError, match="cohere HTTP 429"):
+        providers.call_cohere(get_provider("cohere"), "command-a-03-2025",
+                              [{"role": "user", "content": "hi"}])
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(401, text="bad key"))
+    with pytest.raises(RuntimeError, match="bad key"):
+        providers.call_cohere(get_provider("cohere"), "command-a-03-2025",
+                              [{"role": "user", "content": "hi"}])
+
+
+# ---------------------------------------------------------------------------
+# call_provider dispatch + health helpers
+# ---------------------------------------------------------------------------
+
+def test_call_provider_dispatches_cohere(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, json=_cohere_body("via cohere")))
+    monkeypatch.setenv("COHERE_API_KEY", "co-key")
+    msg = providers.call_provider(get_provider("cohere"), "command-a-03-2025",
+                                  [{"role": "user", "content": "hi"}])
+    assert msg["content"] == "via cohere"
+
+
+def test_call_provider_progress_callback(monkeypatch):
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, json=_ok_message("ok")))
+    seen = []
+    providers.call_provider(get_provider("kilo"), "kilo-auto/free",
+                            [{"role": "user", "content": "hi"}],
+                            progress=seen.append)
+    assert seen == ["Kilo Gateway: trying kilo-auto/free…"]
+
+
+def test_health_penalty_unknown_and_thin(monkeypatch):
+    assert providers._health_penalty("kilo", "m", {}) == 0
+    by_leg = {("kilo", "m"): {"attempts": 2, "success_rate": 0.0}}
+    assert providers._health_penalty("kilo", "m", by_leg) == 0
+
+
+def test_health_penalty_bad_and_stale(monkeypatch):
+    by_leg = {("kilo", "m"): {"attempts": 5, "success_rate": 0.2}}
+    assert providers._health_penalty("kilo", "m", by_leg) == 1
+    by_leg = {("kilo", "m"): {"attempts": 5, "success_rate": 0.9, "stale": True}}
+    assert providers._health_penalty("kilo", "m", by_leg) == 2
+
+
+def test_health_penalty_malformed_row(monkeypatch):
+    by_leg = {("kilo", "m"): {"attempts": "many", "success_rate": "bad"}}
+    assert providers._health_penalty("kilo", "m", by_leg) == 0
+
+
+@pytest.mark.parametrize("val,enabled", [
+    ("1", True), ("0", False), ("false", False), ("no", False),
+    ("off", False), ("yes", True), ("", True),
+])
+def test_health_order_enabled_env(monkeypatch, val, enabled):
+    monkeypatch.setenv("ROUTER_HEALTH_ORDER", val)
+    assert providers._health_order_enabled() is enabled
+
+
+def test_health_order_enabled_default(monkeypatch):
+    monkeypatch.delenv("ROUTER_HEALTH_ORDER", raising=False)
+    assert providers._health_order_enabled() is True
+
+
+def test_omni_chain_uncensored_first_off(monkeypatch):
+    # With UNCENSORED_FIRST off, the keyless backstop leads the chain.
+    import app.guard_policy as gp
+    monkeypatch.setattr(gp, "UNCENSORED_FIRST", False)
+    monkeypatch.setenv("DEEPINFRA_API_KEY", "x")
+    chain = omni_chain()
+    names = [p.name for p, _ in chain]
+    assert names.index("llm7") < names.index("deepinfra")
+    assert names.index("kilo") < names.index("deepinfra")
+
+
+def test_omni_chain_explicit_unknown_provider_ignored():
+    chain = omni_chain("nope:some-model")
+    assert chain, "keyless backstop must still be present"
+    assert all(p.name != "nope" for p, _ in chain)
+
+
+def test_providerdef_keyless_property():
+    assert get_provider("kilo").keyless is True
+    assert get_provider("groq").keyless is False

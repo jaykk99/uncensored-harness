@@ -298,3 +298,576 @@ def test_omni_leg_refusal_still_refusal_not_error(tmp_path, monkeypatch):
     (row,) = rs.snapshot()
     assert row["refusals"] == 1 and row["errors"] == 0
     assert row["last_error"] is None
+
+
+# ---------------------------------------------------------------------------
+# HTTP paths — stubbed httpx transport, no network, no real sleeps
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+import httpx
+
+
+def _mock_models_client(monkeypatch, handler):
+    def factory(timeout):
+        return httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(models, "_client", factory)
+
+
+@pytest.fixture(autouse=True)
+def _no_sleeps(monkeypatch):
+    monkeypatch.setattr(models, "_sleep_backoff", lambda attempt, **k: 0.0)
+    monkeypatch.setattr(models, "_pace_pollinations", lambda: None)
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+
+
+def _poll_msg(content="pollinations answer"):
+    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+
+# --- pollinations_chat (non-streaming) ---
+
+def test_pollinations_chat_success(monkeypatch):
+    _mock_models_client(monkeypatch, lambda req: httpx.Response(200, json=_poll_msg()))
+    msg = models.pollinations_chat([{"role": "user", "content": "hi"}])
+    assert msg["content"] == "pollinations answer"
+
+
+def test_pollinations_chat_tools_in_body(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        seen["body"] = json.loads(req.content)
+        return httpx.Response(200, json=_poll_msg())
+    _mock_models_client(monkeypatch, handler)
+    tools = [{"type": "function", "function": {"name": "web_search"}}]
+    models.pollinations_chat([{"role": "user", "content": "hi"}], tools=tools)
+    assert seen["body"]["tools"] == tools
+    assert seen["body"]["tool_choice"] == "auto"
+    assert seen["body"]["model"] == models.POLLINATIONS_MODEL
+
+
+def test_pollinations_chat_retries_429_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, json=_poll_msg("second try"))
+    _mock_models_client(monkeypatch, handler)
+    msg = models.pollinations_chat([{"role": "user", "content": "hi"}],
+                                   retries=3)
+    assert msg["content"] == "second try"
+    assert calls["n"] == 2
+
+
+def test_pollinations_chat_empty_choices_retry_then_success(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"choices": []})
+        return httpx.Response(200, json=_poll_msg("after empty"))
+    _mock_models_client(monkeypatch, handler)
+    msg = models.pollinations_chat([{"role": "user", "content": "hi"}],
+                                   retries=3)
+    assert msg["content"] == "after empty"
+
+
+def test_pollinations_chat_empty_choices_exhausted(monkeypatch):
+    _mock_models_client(monkeypatch,
+                        lambda req: httpx.Response(200, json={"choices": []}))
+    with pytest.raises(RuntimeError, match="empty choices"):
+        models.pollinations_chat([{"role": "user", "content": "hi"}], retries=2)
+
+
+def test_pollinations_chat_keeps_failing(monkeypatch):
+    _mock_models_client(monkeypatch,
+                        lambda req: httpx.Response(429, text="slow"))
+    with pytest.raises(RuntimeError, match="kept failing after 3 attempts"):
+        models.pollinations_chat([{"role": "user", "content": "hi"}], retries=3)
+
+
+def test_pollinations_chat_http_status_error(monkeypatch):
+    # A non-retryable 4xx surfaces as an HTTP error with the status + body.
+    _mock_models_client(monkeypatch,
+                        lambda req: httpx.Response(400, text="bad request"))
+    with pytest.raises(RuntimeError, match="pollinations HTTP 400: bad request"):
+        models.pollinations_chat([{"role": "user", "content": "hi"}], retries=1)
+
+
+def test_pollinations_chat_network_error_retries_then_fails(monkeypatch):
+    def handler(req):
+        raise httpx.ConnectError("boom", request=req)
+    _mock_models_client(monkeypatch, handler)
+    with pytest.raises(RuntimeError, match="network failure"):
+        models.pollinations_chat([{"role": "user", "content": "hi"}], retries=2)
+
+
+def test_pollinations_chat_progress_reports_attempts(monkeypatch):
+    _mock_models_client(monkeypatch, lambda req: httpx.Response(200, json=_poll_msg()))
+    seen = []
+    models.pollinations_chat([{"role": "user", "content": "hi"}],
+                             progress=seen.append)
+    assert seen == ["Pollinations: attempt 1/4…"]
+
+
+# --- _pollinations_stream ---
+
+def _sse_response(text):
+    return httpx.Response(200, content=text.encode())
+
+
+def test_pollinations_stream_forwards_tokens(monkeypatch):
+    sse = ('data: {"choices": [{"delta": {"content": "hel"}}]}\n\n'
+           'data: {"choices": [{"delta": {"content": "lo"}}]}\n\n'
+           'data: [DONE]\n\n')
+    _mock_models_client(monkeypatch, lambda req: _sse_response(sse))
+    seen = []
+    msg = models._pollinations_stream({"model": "openai", "messages": []},
+                                      30, seen.append)
+    assert msg["content"] == "hello"
+    assert seen == ["hel", "lo"]
+
+
+def test_pollinations_stream_accumulates_tool_calls(monkeypatch):
+    sse = (
+        'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", '
+        '"function": {"name": "shell_exec", "arguments": "{\\"cmd"}}]}}]}\n\n'
+        'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, '
+        '"function": {"arguments": "\\": \\"ls\\"}"}}]}}]}\n\n'
+        'data: [DONE]\n\n')
+    _mock_models_client(monkeypatch, lambda req: _sse_response(sse))
+    msg = models._pollinations_stream({"model": "openai", "messages": []},
+                                      30, lambda t: None)
+    assert msg["content"] == ""
+    (tc,) = msg["tool_calls"]
+    assert tc["function"]["name"] == "shell_exec"
+    assert tc["function"]["arguments"] == '{"cmd": "ls"}'
+
+
+def test_pollinations_stream_skips_bad_lines(monkeypatch):
+    sse = ('data: garbage{\n'
+           'data: {"choices": []}\n'
+           'data: {"choices": [{"delta": {"content": "fine"}}]}\n\n'
+           'data: [DONE]\n\n')
+    _mock_models_client(monkeypatch, lambda req: _sse_response(sse))
+    msg = models._pollinations_stream({"model": "openai", "messages": []},
+                                      30, lambda t: None)
+    assert msg["content"] == "fine"
+
+
+def test_pollinations_stream_empty_raises(monkeypatch):
+    _mock_models_client(monkeypatch,
+                        lambda req: _sse_response("data: [DONE]\n\n"))
+    with pytest.raises(RuntimeError, match="no content"):
+        models._pollinations_stream({"model": "openai", "messages": []},
+                                    30, lambda t: None)
+
+
+def test_pollinations_stream_retryable_status(monkeypatch):
+    _mock_models_client(monkeypatch,
+                        lambda req: httpx.Response(502, text="bad gateway"))
+    with pytest.raises(RuntimeError, match="pollinations HTTP 502"):
+        models._pollinations_stream({"model": "openai", "messages": []},
+                                    30, lambda t: None)
+
+
+def test_pollinations_stream_on_token_failure_tolerated(monkeypatch):
+    sse = ('data: {"choices": [{"delta": {"content": "a"}}]}\n\n'
+           'data: {"choices": [{"delta": {"content": "b"}}]}\n\n'
+           'data: [DONE]\n\n')
+    _mock_models_client(monkeypatch, lambda req: _sse_response(sse))
+
+    def bad_token(t):
+        raise RuntimeError("UI blew up")
+
+    msg = models._pollinations_stream({"model": "openai", "messages": []},
+                                      30, bad_token)
+    assert msg["content"] == "ab"
+
+
+def test_pollinations_chat_streaming_path(monkeypatch):
+    sse = ('data: {"choices": [{"delta": {"content": "streamed"}}]}\n\n'
+           'data: [DONE]\n\n')
+    _mock_models_client(monkeypatch, lambda req: _sse_response(sse))
+    seen = []
+    msg = models.pollinations_chat([{"role": "user", "content": "hi"}],
+                                   on_token=seen.append)
+    assert msg["content"] == "streamed"
+    assert seen == ["streamed"]
+
+
+# --- Horde submit / generate ---
+
+def _horde_submit_ok(req):
+    assert req.url.path.endswith("/generate/text/async")
+    return httpx.Response(200, json={"id": "job-123"})
+
+
+def test_horde_submit_success(monkeypatch):
+    _mock_models_client(monkeypatch, _horde_submit_ok)
+    job = models._horde_submit("https://stablehorde.net/api/v2",
+                               {"apikey": "0000000000"}, {"prompt": "x"})
+    assert job == "job-123"
+
+
+def test_horde_submit_retries_429(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, text="slow")
+        return httpx.Response(200, json={"id": "job-9"})
+    _mock_models_client(monkeypatch, handler)
+    job = models._horde_submit("https://stablehorde.net/api/v2", {}, {})
+    assert job == "job-9"
+    assert calls["n"] == 2
+
+
+def test_horde_submit_no_job_id_raises(monkeypatch):
+    _mock_models_client(monkeypatch,
+                        lambda req: httpx.Response(200, json={}))
+    with pytest.raises(RuntimeError, match="no job id"):
+        models._horde_submit("https://stablehorde.net/api/v2", {}, {})
+
+
+def test_horde_submit_network_error_exhausts(monkeypatch):
+    def handler(req):
+        raise httpx.ConnectError("down", request=req)
+    _mock_models_client(monkeypatch, handler)
+    with pytest.raises(RuntimeError, match="horde submit failed"):
+        models._horde_submit("https://stablehorde.net/api/v2", {}, {})
+
+
+def _horde_status_handler(done_text="horde says hi", faulted=False,
+                          vanish=False):
+    def handler(req):
+        if req.url.path.endswith("/generate/text/async"):
+            return httpx.Response(200, json={"id": "job-1"})
+        if vanish:
+            return httpx.Response(404, text="gone")
+        return httpx.Response(200, json={
+            "done": True, "faulted": faulted, "queue_position": 0,
+            "generations": [{"text": done_text}] if done_text else []})
+    return handler
+
+
+def test_horde_generate_returns_text(monkeypatch):
+    _mock_models_client(monkeypatch, _horde_status_handler())
+    text = models._horde_generate("prompt", 100, 0.7, timeout_s=30)
+    assert text == "horde says hi"
+
+
+def test_horde_generate_faulted_fails_both_endpoints(monkeypatch):
+    _mock_models_client(monkeypatch, _horde_status_handler(faulted=True))
+    with pytest.raises(RuntimeError, match="all endpoints failed"):
+        models._horde_generate("prompt", 100, 0.7, timeout_s=30)
+
+
+def test_horde_generate_job_vanished(monkeypatch):
+    _mock_models_client(monkeypatch, _horde_status_handler(vanish=True))
+    with pytest.raises(RuntimeError, match="all endpoints failed"):
+        models._horde_generate("prompt", 100, 0.7, timeout_s=30)
+
+
+def test_horde_generate_empty_generation(monkeypatch):
+    _mock_models_client(monkeypatch, _horde_status_handler(done_text=""))
+    with pytest.raises(RuntimeError, match="all endpoints failed"):
+        models._horde_generate("prompt", 100, 0.7, timeout_s=30)
+
+
+def test_horde_generate_timeout(monkeypatch):
+    def handler(req):
+        if req.url.path.endswith("/generate/text/async"):
+            return httpx.Response(200, json={"id": "job-1"})
+        return httpx.Response(200, json={"done": False, "queue_position": 3})
+    _mock_models_client(monkeypatch, handler)
+    # Sleep is stubbed to no-op, so the poll loop spins on the mock until
+    # the real 1s deadline, then raises.
+    with pytest.raises(RuntimeError, match="all endpoints failed"):
+        models._horde_generate("prompt", 100, 0.7, timeout_s=1)
+
+
+def test_horde_generate_falls_back_to_second_api(monkeypatch):
+    def handler(req):
+        host = req.url.host
+        if req.url.path.endswith("/generate/text/async"):
+            if "stablehorde" in host:
+                return httpx.Response(500, text="oops")
+            return httpx.Response(200, json={"id": "job-2"})
+        return httpx.Response(200, json={
+            "done": True, "generations": [{"text": "second api wins"}]})
+    _mock_models_client(monkeypatch, handler)
+    text = models._horde_generate("prompt", 100, 0.7, timeout_s=30)
+    assert text == "second api wins"
+
+
+def test_horde_generate_preferred_model_first(monkeypatch):
+    seen = {}
+
+    def handler(req):
+        if req.url.path.endswith("/generate/text/async"):
+            seen["models"] = json.loads(req.content)["models"]
+            return httpx.Response(200, json={"id": "job-1"})
+        return httpx.Response(200, json={
+            "done": True, "generations": [{"text": "ok"}]})
+    _mock_models_client(monkeypatch, handler)
+    preferred = "koboldcpp/Rocinante-X-12B-v1"
+    models._horde_generate("prompt", 100, 0.7, timeout_s=30,
+                           preferred_model=preferred)
+    assert seen["models"][0] == preferred
+    assert len(seen["models"]) == len(models.HORDE_UNCENSORED_MODELS)
+
+
+def test_horde_chat_flattens_messages(monkeypatch):
+    seen = {}
+
+    def fake_generate(prompt, *a, **k):
+        seen["prompt"] = prompt
+        return "out"
+
+    monkeypatch.setattr(models, "_horde_generate", fake_generate)
+    out = models.horde_chat([
+        {"role": "system", "content": "be helpful"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi back"},
+        {"role": "tool", "content": "tool output"},
+        {"role": "user", "content": [{"type": "text", "text": "list part"}]},
+    ])
+    assert out == "out"
+    prompt = seen["prompt"]
+    assert "be helpful" in prompt
+    assert "User: hello" in prompt
+    assert "Assistant: hi back" in prompt
+    assert "Tool result: tool output" in prompt
+    assert "list part" in prompt
+    assert prompt.endswith("\nAssistant:")
+
+
+# --- _race_first_response / chat() fallback chain ---
+
+def _race(monkeypatch, horde=None, kilo=None, llm7=None, poll=None):
+    import app.providers as pm
+    monkeypatch.setattr(models, "horde_chat", horde or (lambda *a, **k: (_ for _ in ()).throw(RuntimeError("horde down"))))
+    monkeypatch.setattr(models, "pollinations_chat", poll or (lambda *a, **k: (_ for _ in ()).throw(RuntimeError("poll down"))))
+
+    def fake_call_provider(p, model, messages, *a, **k):
+        name = p.name
+        canned = {"kilo": kilo, "llm7": llm7}.get(name)
+        if canned is None:
+            raise RuntimeError(f"{name} down")
+        return {"content": canned}
+    monkeypatch.setattr(pm, "call_provider", fake_call_provider)
+
+
+def test_race_kilo_wins_when_others_fail(monkeypatch):
+    _race(monkeypatch, kilo="kilo answered")
+    text, source, calls, raw = models._race_first_response(
+        [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+    assert text == "kilo answered"
+    assert source.startswith("kilo/")
+
+
+def test_race_pollinations_wins(monkeypatch):
+    _race(monkeypatch, poll=lambda *a, **k: {"content": "poll wins"})
+    text, source, calls, raw = models._race_first_response(
+        [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+    assert text == "poll wins"
+    assert source == "pollinations"
+
+
+def test_race_horde_wins(monkeypatch):
+    _race(monkeypatch, horde=lambda *a, **k: "horde wins")
+    text, source, calls, raw = models._race_first_response(
+        [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+    assert text == "horde wins"
+    assert source == "horde"
+
+
+def test_race_refusal_skipped_other_leg_wins(monkeypatch):
+    _race(monkeypatch,
+          horde=lambda *a, **k: "I'm sorry, I can't help with that.",
+          kilo="kilo saves the turn")
+    text, source, calls, raw = models._race_first_response(
+        [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+    assert text == "kilo saves the turn"
+
+
+def test_race_all_fail_raises(monkeypatch):
+    _race(monkeypatch)
+    with pytest.raises(RuntimeError, match="All providers failed"):
+        models._race_first_response(
+            [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+
+
+def test_race_empty_reply_is_error_not_winner(monkeypatch):
+    _race(monkeypatch, kilo="", llm7="llm7 non-empty")
+    text, source, calls, raw = models._race_first_response(
+        [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+    assert text == "llm7 non-empty"
+
+
+def test_race_progress_reported(monkeypatch):
+    _race(monkeypatch, kilo="k")
+    seen = []
+    models._race_first_response(
+        [{"role": "user", "content": "hi"}], 100, 0.7, None, seen.append, "")
+    assert seen and "Trying fast providers" in seen[0]
+
+
+def test_chat_race_win_returns_immediately(monkeypatch):
+    monkeypatch.setattr(
+        models, "_race_first_response",
+        lambda *a, **k: ("race text", "kilo/m", [], None))
+    text, source, calls, raw, streamed = models.chat(
+        [{"role": "user", "content": "hi"}])
+    assert (text, source, streamed) == ("race text", "kilo/m", False)
+
+
+def test_chat_falls_back_to_omni(monkeypatch):
+    monkeypatch.setattr(models, "_race_first_response",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(models, "_omni_leg",
+                        lambda *a, **k: ("omni text", "groq/m", [], {"content": "omni text"}))
+    text, source, calls, raw, streamed = models.chat(
+        [{"role": "user", "content": "hi"}])
+    assert text == "omni text" and source == "groq/m"
+
+
+def test_chat_falls_back_to_pollinations(monkeypatch):
+    monkeypatch.setattr(models, "_race_first_response",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(models, "_omni_leg", lambda *a, **k: None)
+    monkeypatch.setattr(models, "pollinations_chat",
+                        lambda *a, **k: {"content": "poll fallback"})
+    text, source, calls, raw, streamed = models.chat(
+        [{"role": "user", "content": "hi"}])
+    assert text == "poll fallback" and source == "pollinations"
+
+
+def test_chat_pollinations_refusal_then_horde_retry(monkeypatch):
+    monkeypatch.setattr(models, "_race_first_response",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(models, "_omni_leg", lambda *a, **k: None)
+    monkeypatch.setattr(models, "pollinations_chat",
+                        lambda *a, **k: {"content": "I'm sorry, I can't help."})
+    monkeypatch.setattr(models, "horde_chat",
+                        lambda *a, **k: "horde retry answer")
+    text, source, calls, raw, streamed = models.chat(
+        [{"role": "user", "content": "hi"}])
+    assert text == "horde retry answer"
+    assert source == "horde (retry)"
+
+
+def test_chat_horde_retry_refusal_labelled(monkeypatch):
+    monkeypatch.setattr(models, "_race_first_response",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(models, "_omni_leg", lambda *a, **k: None)
+    monkeypatch.setattr(models, "pollinations_chat",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("poll down")))
+    monkeypatch.setattr(models, "horde_chat",
+                        lambda *a, **k: "I'm sorry, I can't help.")
+    text, source, calls, raw, streamed = models.chat(
+        [{"role": "user", "content": "hi"}])
+    assert source == "horde (refused too)"
+
+
+def test_chat_all_legs_fail_raises(monkeypatch):
+    monkeypatch.setattr(models, "_race_first_response",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(models, "_omni_leg", lambda *a, **k: None)
+    monkeypatch.setattr(models, "pollinations_chat",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("poll down")))
+    monkeypatch.setattr(models, "horde_chat",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("horde down")))
+    with pytest.raises(RuntimeError, match="all model legs failed"):
+        models.chat([{"role": "user", "content": "hi"}])
+
+
+def test_chat_streamed_flag_propagates(monkeypatch):
+    monkeypatch.setattr(models, "_race_first_response",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(models, "_omni_leg", lambda *a, **k: None)
+
+    def fake_poll(*a, **k):
+        on_token = k.get("on_token")
+        if on_token:
+            on_token("tok")
+        return {"content": "tok"}
+    monkeypatch.setattr(models, "pollinations_chat", fake_poll)
+    text, source, calls, raw, streamed = models.chat(
+        [{"role": "user", "content": "hi"}], on_token=lambda t: None)
+    assert streamed is True
+
+
+# --- small helpers ---
+
+def test_sleep_backoff_grows_with_attempt(monkeypatch):
+    # The autouse fixture stubs _sleep_backoff itself; restore the real one.
+    monkeypatch.undo()
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+    monkeypatch.setattr(models.random, "uniform", lambda a, b: 0.5)
+    d0 = models._sleep_backoff(0)
+    d3 = models._sleep_backoff(3)
+    assert d0 == pytest.approx(2.5)
+    assert d3 == pytest.approx(15.5)  # capped at 15 + jitter
+
+
+def test_pace_pollinations_waits_when_recent(monkeypatch):
+    # The autouse fixture stubs _pace_pollinations itself; restore the real one.
+    monkeypatch.undo()
+    import time as real_time
+    prev = models._last_pollinations_ts
+    try:
+        models._last_pollinations_ts = real_time.time()
+        waited = []
+        monkeypatch.setattr(_time, "sleep", lambda s: waited.append(s))
+        models._pace_pollinations()
+        assert waited and 0 < waited[0] <= 1.5
+    finally:
+        models._last_pollinations_ts = prev
+
+
+def test_pace_pollinations_no_wait_when_stale(monkeypatch):
+    monkeypatch.undo()
+    import time as real_time
+    prev = models._last_pollinations_ts
+    try:
+        models._last_pollinations_ts = real_time.time() - 100
+        waited = []
+        monkeypatch.setattr(_time, "sleep", lambda s: waited.append(s))
+        models._pace_pollinations()
+        assert waited == []
+    finally:
+        models._last_pollinations_ts = prev
+
+
+def test_proxy_ignores_loopback(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("http_proxy", raising=False)
+    assert models._proxy() is None
+
+
+def test_proxy_returns_real_proxy(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    assert models._proxy() == "http://proxy.example:8080"
+
+
+def test_proxy_none_when_unset(monkeypatch):
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    assert models._proxy() is None
+
+
+def test_verify_returns_bundle_when_present(monkeypatch):
+    monkeypatch.setattr("os.path.isfile", lambda p: True)
+    assert models._verify() == "/etc/ssl/certs/ca-certificates.crt"
+    monkeypatch.setattr("os.path.isfile", lambda p: False)
+    assert models._verify() is True

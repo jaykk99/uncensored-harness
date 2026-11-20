@@ -502,7 +502,7 @@ def _race_first_response(messages: list[dict], max_tokens: int,
             _record_leg("horde", horde_model, "refusal", started)
             raise _Refusal("horde refused")
         _record_leg("horde", horde_model, "ok", started)
-        return ("horde", text, [], None)
+        return (text, "horde", [], None)
 
     def _fast_provider_race(provider_name: str, max_models: int = 2):
         """Try a keyless provider's first models; return the first that works."""
@@ -537,7 +537,7 @@ def _race_first_response(messages: list[dict], max_tokens: int,
                 last_err = RuntimeError("refusal")
                 continue
             _record_leg(provider_name, model, "ok", started)
-            return (f"{provider_name}/{model}", text, tool_calls, msg)
+            return (text, f"{provider_name}/{model}", tool_calls, msg)
         raise RuntimeError(f"{provider_name} failed (last: {last_err})")
 
     def _pollinations_race():
@@ -556,7 +556,7 @@ def _race_first_response(messages: list[dict], max_tokens: int,
             _record_leg("pollinations", POLLINATIONS_MODEL, "refusal", started)
             raise _Refusal("pollinations refused")
         _record_leg("pollinations", POLLINATIONS_MODEL, "ok", started)
-        return ("pollinations", text, tool_calls, msg)
+        return (text, "pollinations", tool_calls, msg)
 
     legs = [
         ("horde", _horde_race),
@@ -585,7 +585,7 @@ def _race_first_response(messages: list[dict], max_tokens: int,
                 if f is not future:
                     f.cancel()
             if progress:
-                progress(f"{result[0]} answered first, using it.")
+                progress(f"{result[1]} answered first, using it.")
             return result
 
     raise RuntimeError(

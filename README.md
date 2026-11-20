@@ -137,7 +137,7 @@ pip install pytest
 python -m pytest tests/ -q
 ```
 
-411 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, probe history, router stats, and thread reopen/delete/rename/search/message-prune/message-edit/in-thread-search/global-message-search/search-paging/thread-instructions/thread-list-paging. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
+609 tests, no network (HTTP is stubbed): guard boundaries, sqlite thread storage, refusal detection, provider chain ordering, SSRF/path safety, web-search fallback, the forwarder CONNECT tunnel, all five integrations, the probe suite, probe history, router stats, and thread reopen/delete/rename/search/message-prune/message-edit/in-thread-search/global-message-search/search-paging/thread-instructions/thread-list-paging. Tests must pass before every push — a red suite means the repo is BLOCKED, not padded.
 
 ## Architecture
 

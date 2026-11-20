@@ -388,3 +388,471 @@ def test_tool_wrapper_formats_errors(fake_http, gh_env):
     routes[("GET", "/user/repos")] = FakeResp([])
     out3 = T._integration_call(NI.github_action, "repos", {})
     assert out3.strip() == "[]"
+
+
+# ---------------------------------------------------------------------------
+# GitHub — repo / file / issues / prs / workflow_runs
+# ---------------------------------------------------------------------------
+
+def test_github_repo_mapping(fake_http, gh_env):
+    routes, _ = fake_http
+    routes[("GET", "/repos/jaykk99/x")] = FakeResp({
+        "full_name": "jaykk99/x", "private": False,
+        "description": "d", "default_branch": "main",
+        "stargazers_count": 3, "forks_count": 1,
+        "open_issues_count": 2, "html_url": "https://github.com/jaykk99/x"})
+    r = GitHub.repo("jaykk99/x")
+    assert r["stars"] == 3 and r["default_branch"] == "main"
+    assert r["open_issues"] == 2
+
+
+def test_github_file_base64_decoded(fake_http, gh_env):
+    routes, clients = fake_http
+    content = base64.b64encode(b"hello file").decode()
+    routes[("GET", "/repos/jaykk99/x/contents/a/b.txt")] = FakeResp({
+        "path": "a/b.txt", "sha": "abc", "size": 10,
+        "content": content, "encoding": "base64"})
+    r = GitHub.file("jaykk99/x", "/a/b.txt")
+    assert r["content"] == "hello file" and r["sha"] == "abc"
+    # ref is passed as a query param when given.
+    routes[("GET", "/repos/jaykk99/x/contents/a/b.txt")] = FakeResp({
+        "path": "a/b.txt", "sha": "abc", "size": 10,
+        "content": "plain", "encoding": "none"})
+    r = GitHub.file("jaykk99/x", "a/b.txt", ref="dev")
+    assert r["content"] == "plain"
+    assert clients[-1].calls[-1][2]["params"] == {"ref": "dev"}
+
+
+def test_github_issues_and_prs(fake_http, gh_env):
+    routes, _ = fake_http
+    routes[("GET", "/repos/jaykk99/x/issues")] = FakeResp([
+        {"number": 1, "title": "bug", "state": "open",
+         "labels": [{"name": "a"}], "html_url": "u1"},
+        {"number": 2, "title": "pr-ish", "state": "open",
+         "labels": [], "html_url": "u2", "pull_request": {}}])
+    issues = GitHub.issues("jaykk99/x")
+    assert issues[0]["labels"] == ["a"] and issues[0]["is_pr"] is False
+    assert issues[1]["is_pr"] is True
+    routes[("GET", "/repos/jaykk99/x/pulls")] = FakeResp([
+        {"number": 5, "title": "feat", "state": "open",
+         "head": {"ref": "f"}, "base": {"ref": "main"},
+         "draft": True, "html_url": "u5"}])
+    (pr,) = GitHub.prs("jaykk99/x")
+    assert pr["head"] == "f" and pr["draft"] is True
+
+
+def test_github_workflow_runs_named_and_all(fake_http, gh_env):
+    routes, _ = fake_http
+    run_row = {"id": 7, "name": "ci", "status": "completed",
+               "conclusion": "success", "head_branch": "main",
+               "event": "push", "created_at": "2026-01-01",
+               "html_url": "u"}
+    routes[("GET", "/actions/workflows/ci.yml/runs")] = FakeResp(
+        {"workflow_runs": [run_row]})
+    routes[("GET", "/actions/runs")] = FakeResp({"workflow_runs": [run_row]})
+    named = GitHub.workflow_runs("jaykk99/x", workflow="ci.yml")
+    assert named[0]["id"] == 7 and named[0]["conclusion"] == "success"
+    all_runs = GitHub.workflow_runs("jaykk99/x")
+    assert len(all_runs) == 1
+
+
+def test_github_post_empty_body_returns_empty_dict(fake_http, gh_env):
+    routes, _ = fake_http
+    routes[("POST", "/dispatches")] = FakeResp(None, text="")
+    out = GitHub.dispatch("jaykk99/x", "ci.yml")
+    assert out == {"ok": True, "workflow": "ci.yml", "ref": "main"}
+
+
+def test_raise_for_retryable_status(fake_http, gh_env):
+    routes, _ = fake_http
+    routes[("GET", "/user/repos")] = FakeResp(None, status_code=429,
+                                              text="slow down")
+    with pytest.raises(RuntimeError, match="transient — retry"):
+        GitHub.repos()
+
+
+def test_github_repos_limit_clamped(fake_http, gh_env):
+    routes, clients = fake_http
+    routes[("GET", "/user/repos")] = FakeResp([])
+    GitHub.repos(limit=500)
+    assert clients[-1].calls[-1][2]["params"]["per_page"] == 100
+    GitHub.repos(limit=0)
+    assert clients[-1].calls[-1][2]["params"]["per_page"] == 1
+
+
+# ---------------------------------------------------------------------------
+# GitLab — project / issues
+# ---------------------------------------------------------------------------
+
+def test_gitlab_project_and_issues(fake_http, gl_env):
+    routes, clients = fake_http
+    routes[("GET", "/api/v4/projects/42")] = FakeResp({
+        "id": 42, "path_with_namespace": "grp/proj", "description": "d",
+        "default_branch": "main", "star_count": 4, "forks_count": 2,
+        "open_issues_count": 1, "web_url": "https://gitlab.com/grp/proj"})
+    p = GitLab.project(42)
+    assert p["stars"] == 4 and p["name"] == "grp/proj"
+    routes[("GET", "/api/v4/projects/42/issues")] = FakeResp([
+        {"iid": 3, "title": "t", "state": "opened",
+         "labels": ["x"], "web_url": "u"}])
+    (i,) = GitLab.issues(42)
+    assert i["iid"] == 3 and i["labels"] == ["x"]
+    routes[("GET", "/api/v4/projects")] = FakeResp([])
+    GitLab.projects(search="foo", limit=5)
+    params = clients[-1].calls[-1][2]["params"]
+    assert params["search"] == "foo" and params["per_page"] == 5
+
+
+def test_gitlab_pipelines_sha_shortened(fake_http, gl_env):
+    routes, _ = fake_http
+    routes[("GET", "/api/v4/projects/1/pipelines")] = FakeResp([
+        {"id": 9, "status": "success", "ref": "main",
+         "sha": "abcdef0123456789", "created_at": "t", "web_url": "u"}])
+    (pl,) = GitLab.pipelines(1)
+    assert pl["sha"] == "abcdef01"
+
+
+# ---------------------------------------------------------------------------
+# Gmail — search / get / body extraction / token cache
+# ---------------------------------------------------------------------------
+
+def _gmail_token_route(routes):
+    routes[("POST", "oauth2.googleapis.com/token")] = FakeResp({
+        "access_token": "tok-1", "expires_in": 3600})
+
+
+def test_gmail_search_fills_snippets(fake_http, gmail_env):
+    routes, _ = fake_http
+    _gmail_token_route(routes)
+    routes[("GET", "/gmail/v1/users/me/messages")] = FakeResp({
+        "messages": [{"id": "m1", "threadId": "t1"},
+                     {"id": "m2", "threadId": "t2"}]})
+    routes[("GET", "/gmail/v1/users/me/messages/m1")] = FakeResp({
+        "id": "m1", "threadId": "t1", "snippet": "snip one",
+        "payload": {"headers": [
+            {"name": "Subject", "value": "Hi"},
+            {"name": "From", "value": "a@b.c"},
+            {"name": "Date", "value": "Mon"}]}})
+    routes[("GET", "/gmail/v1/users/me/messages/m2")] = FakeResp(
+        None, status_code=404, text="gone")
+    out = Gmail.search("from:x", limit=10)
+    assert len(out) == 2
+    assert out[0]["snippet"] == "snip one" and out[0]["subject"] == "Hi"
+    # A failed per-message fetch leaves the snippet blank, not an error.
+    assert out[1]["snippet"] == ""
+
+
+def test_gmail_get_full_body_plain_and_html(fake_http, gmail_env):
+    routes, _ = fake_http
+    _gmail_token_route(routes)
+    plain = base64.urlsafe_b64encode(b"plain body").decode()
+    html = base64.urlsafe_b64encode(b"<p>html body</p>").decode()
+    routes[("GET", "/gmail/v1/users/me/messages/m9")] = FakeResp({
+        "id": "m9", "threadId": "t", "snippet": "s",
+        "payload": {"headers": [{"name": "Subject", "value": "Sub"}],
+                    "parts": [
+                        {"mimeType": "text/html",
+                         "body": {"data": html}},
+                        {"mimeType": "text/plain",
+                         "body": {"data": plain}}]}})
+    out = Gmail.get("m9")
+    assert out["body"] == "plain body"
+    assert out["subject"] == "Sub"
+
+
+def test_gmail_get_metadata_has_no_body(fake_http, gmail_env):
+    routes, _ = fake_http
+    _gmail_token_route(routes)
+    routes[("GET", "/gmail/v1/users/me/messages/m1")] = FakeResp({
+        "id": "m1", "payload": {"headers": []}})
+    out = Gmail.get("m1", fmt="metadata")
+    assert out["body"] == ""
+
+
+def test_gmail_extract_body_variants():
+    plain = base64.urlsafe_b64encode(b"p").decode()
+    html = base64.urlsafe_b64encode(b"<b>h</b> x").decode()
+    assert Gmail._extract_body({"mimeType": "text/plain",
+                                "body": {"data": plain}}) == "p"
+    assert Gmail._extract_body({"mimeType": "text/html",
+                                "body": {"data": html}}) == " h  x"
+    nested = {"parts": [{"mimeType": "text/plain",
+                         "body": {"data": plain}}]}
+    assert Gmail._extract_body(nested) == "p"
+    assert Gmail._extract_body({}) == ""
+
+
+def test_gmail_token_cached_between_calls(fake_http, gmail_env):
+    routes, clients = fake_http
+    _gmail_token_route(routes)
+    routes[("POST", "/gmail/v1/users/me/messages/send")] = FakeResp(
+        {"id": "sent-1"})
+    Gmail.send("a@b.c", "s", "b")
+    Gmail.send("a@b.c", "s2", "b2")
+    token_calls = [c for c in clients[0].calls
+                   if "oauth2" in c[1]] if clients else []
+    # One token fetch total across both sends (the second reuses the cache).
+    all_calls = [c for cl in clients for c in cl.calls]
+    assert sum(1 for c in all_calls if "oauth2" in c[1]) == 1
+
+
+def test_gmail_send_default_subject(fake_http, gmail_env):
+    routes, _ = fake_http
+    _gmail_token_route(routes)
+    routes[("POST", "/gmail/v1/users/me/messages/send")] = FakeResp(
+        {"id": "sent-2"})
+    out = Gmail.send("a@b.c", "", "body")
+    assert out["id"] == "sent-2" and out["to"] == "a@b.c"
+
+
+# ---------------------------------------------------------------------------
+# Vercel — projects / deployments / env_vars / redeploy errors
+# ---------------------------------------------------------------------------
+
+def _vercel_projects_route(routes, name="site", pid="prj_1"):
+    routes[("GET", "/v9/projects")] = FakeResp({"projects": [
+        {"id": pid, "name": name, "framework": "nextjs",
+         "updatedAt": 123}]})
+    return pid
+
+
+def test_vercel_projects_mapping(fake_http, vercel_env):
+    routes, _ = fake_http
+    _vercel_projects_route(routes)
+    (p,) = Vercel.projects()
+    assert p["name"] == "site" and p["url"] == "https://site.vercel.app"
+    assert p["framework"] == "nextjs"
+
+
+def test_vercel_deployments_with_project_filter(fake_http, vercel_env):
+    routes, clients = fake_http
+    _vercel_projects_route(routes)
+    routes[("GET", "/v6/deployments")] = FakeResp({"deployments": [
+        {"uid": "d1", "state": "READY", "url": "site.vercel.app",
+         "createdAt": 5, "meta": {"githubCommitMessage": "fix"}}]})
+    (d,) = Vercel.deployments(project="site")
+    assert d["id"] == "d1" and d["meta"] == "fix"
+    params = clients[-1].calls[-1][2]["params"]
+    assert params["projectId"] == "prj_1"
+    Vercel.deployments()
+    assert "projectId" not in clients[-1].calls[-1][2]["params"]
+
+
+def test_vercel_redeploy_no_github_link(fake_http, vercel_env):
+    routes, _ = fake_http
+    _vercel_projects_route(routes)
+    routes[("GET", "/v9/projects/prj_1")] = FakeResp({"link": {"type": "other"}})
+    with pytest.raises(RuntimeError, match="no linked GitHub repo"):
+        Vercel.redeploy("site")
+
+
+def test_vercel_env_vars_and_unknown_project(fake_http, vercel_env):
+    routes, _ = fake_http
+    _vercel_projects_route(routes)
+    routes[("GET", "/v9/projects/prj_1/env")] = FakeResp({"envs": [
+        {"key": "K", "target": ["production"], "id": "env_1"}]})
+    (e,) = Vercel.env_vars("site")
+    assert e["key"] == "K" and e["id"] == "env_1"
+    with pytest.raises(ValueError, match="no such vercel project"):
+        Vercel.env_vars("ghost")
+    with pytest.raises(ValueError, match="no such vercel project"):
+        Vercel.set_env("ghost", "K", "v")
+
+
+def test_vercel_set_env_new_key_no_delete(fake_http, vercel_env):
+    routes, clients = fake_http
+    _vercel_projects_route(routes)
+    routes[("GET", "/v9/projects/prj_1/env")] = FakeResp({"envs": []})
+    routes[("POST", "/v10/projects/prj_1/env")] = FakeResp({"id": "env_9"})
+    out = Vercel.set_env("site", "NEW_KEY", "v")
+    assert out == {"key": "NEW_KEY", "target": "production", "id": "env_9"}
+    methods = [c[0] for cl in clients for c in cl.calls]
+    assert "DELETE" not in methods
+
+
+def test_vercel_params_team_id(monkeypatch, fake_http, vercel_env):
+    monkeypatch.setenv("VERCEL_TEAM_ID", "team_1")
+    routes, clients = fake_http
+    routes[("GET", "/v9/projects")] = FakeResp({"projects": []})
+    Vercel.projects()
+    assert clients[-1].calls[-1][2]["params"]["teamId"] == "team_1"
+
+
+# ---------------------------------------------------------------------------
+# Fal — generate validation / status / result states
+# ---------------------------------------------------------------------------
+
+def test_fal_generate_requires_prompt(fake_http, fal_env):
+    with pytest.raises(ValueError, match="prompt is required"):
+        Fal.generate("   ")
+
+
+def test_fal_generate_clamps_num_images(fake_http, fal_env):
+    routes, clients = fake_http
+    routes[("POST", "queue.fal.run/fal-ai/flux-2-dev")] = FakeResp(
+        {"request_id": "r1"})
+    Fal.generate("a cat", num_images=99)
+    body = clients[-1].calls[-1][2]["json"]
+    assert body["num_images"] == 4
+    Fal.generate("a cat", num_images=0)
+    assert clients[-1].calls[-1][2]["json"]["num_images"] == 1
+
+
+def test_fal_status_passthrough(fake_http, fal_env):
+    routes, _ = fake_http
+    routes[("GET", "/requests/r1/status")] = FakeResp(
+        {"status": "IN_PROGRESS"})
+    assert Fal.status("r1") == {"status": "IN_PROGRESS"}
+
+
+def test_fal_result_failed_is_honest(fake_http, fal_env):
+    routes, _ = fake_http
+    routes[("GET", "/requests/r1/status")] = FakeResp({"status": "FAILED"})
+    with pytest.raises(RuntimeError, match="not done"):
+        Fal.result("r1", wait_s=5)
+
+
+def test_fal_result_polls_then_returns_images(monkeypatch, fake_http, fal_env):
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+    routes, _ = fake_http
+    states = [{"status": "IN_PROGRESS"}, {"status": "COMPLETED"}]
+    routes[("GET", "/requests/r1/status")] = lambda url, kw: FakeResp(states.pop(0))
+    routes[("GET", "/requests/r1")] = FakeResp({"images": [
+        {"url": "https://img/1.png", "width": 100, "height": 50}]})
+    out = Fal.result("r1", wait_s=5)
+    assert out["images"][0]["url"] == "https://img/1.png"
+
+
+def test_fal_custom_model(monkeypatch, fake_http, fal_env):
+    monkeypatch.setenv("FAL_IMAGE_MODEL", "fal-ai/flux-pro")
+    routes, _ = fake_http
+    routes[("POST", "queue.fal.run/fal-ai/flux-pro")] = FakeResp(
+        {"request_id": "rx"})
+    out = Fal.generate("x")
+    assert out["model"] == "fal-ai/flux-pro"
+
+
+# ---------------------------------------------------------------------------
+# Routers — unknown actions, arg checks, full action coverage
+# ---------------------------------------------------------------------------
+
+def test_routers_unknown_actions(fake_http, gh_env, gl_env, gmail_env,
+                                 vercel_env, fal_env):
+    assert NI.github_action("bogus", {}).startswith("unknown github action")
+    assert NI.gitlab_action("bogus", {}).startswith("unknown gitlab action")
+    assert NI.gmail_action("bogus", {}).startswith("unknown gmail action")
+    assert NI.vercel_action("bogus", {}).startswith("unknown vercel action")
+    assert NI.fal_action("bogus", {}).startswith("unknown fal action")
+
+
+def test_routers_not_connected_messages(fake_http):
+    assert "GITLAB_TOKEN" in NI.gitlab_action("projects", {})
+    assert "Google" in NI.gmail_action("search", {})
+    assert "VERCEL_TOKEN" in NI.vercel_action("projects", {})
+    assert "FAL_KEY" in NI.fal_action("generate", {})
+
+
+def test_github_router_full_actions(fake_http, gh_env):
+    routes, _ = fake_http
+    routes[("GET", "/repos/jaykk99/x")] = FakeResp({
+        "full_name": "jaykk99/x", "private": True, "description": None,
+        "default_branch": "main", "stargazers_count": 0, "forks_count": 0,
+        "open_issues_count": 0, "html_url": "u"})
+    assert NI.github_action("repo", {"owner_repo": "jaykk99/x"})["name"] == "jaykk99/x"
+    routes[("GET", "/repos/jaykk99/x/issues")] = FakeResp([])
+    assert NI.github_action("issues", {"owner_repo": "jaykk99/x"}) == []
+    routes[("GET", "/repos/jaykk99/x/pulls")] = FakeResp([])
+    assert NI.github_action("prs", {"owner_repo": "jaykk99/x"}) == []
+    routes[("GET", "/actions/runs")] = FakeResp({"workflow_runs": []})
+    assert NI.github_action("workflow_runs", {"owner_repo": "jaykk99/x"}) == []
+    routes[("POST", "/dispatches")] = FakeResp(None, text="")
+    assert NI.github_action("dispatch",
+                            {"owner_repo": "jaykk99/x", "workflow": "ci.yml"})["ok"] is True
+    routes[("GET", "/repos/jaykk99/x/contents/f.txt")] = FakeResp({
+        "path": "f.txt", "sha": "s", "size": 1, "content": "x",
+        "encoding": "none"})
+    assert NI.github_action("file", {"owner_repo": "jaykk99/x",
+                                     "path": "f.txt"})["content"] == "x"
+
+
+def test_gitlab_router_actions(fake_http, gl_env):
+    routes, _ = fake_http
+    routes[("GET", "/api/v4/projects")] = FakeResp([])
+    assert NI.gitlab_action("projects", {}) == []
+    routes[("GET", "/api/v4/projects/1")] = FakeResp({
+        "id": 1, "path_with_namespace": "a/b", "description": None,
+        "default_branch": "main", "star_count": 0, "forks_count": 0,
+        "open_issues_count": 0, "web_url": "u"})
+    assert NI.gitlab_action("project", {"project_id": "1"})["id"] == 1
+    routes[("GET", "/api/v4/projects/1/issues")] = FakeResp([])
+    assert NI.gitlab_action("issues", {"project_id": "1"}) == []
+    routes[("GET", "/api/v4/projects/1/pipelines")] = FakeResp([])
+    assert NI.gitlab_action("pipelines", {"project_id": "1"}) == []
+
+
+def test_gmail_router_actions(fake_http, gmail_env):
+    routes, _ = fake_http
+    _gmail_token_route(routes)
+    routes[("POST", "/gmail/v1/users/me/messages/send")] = FakeResp({"id": "s1"})
+    assert NI.gmail_action("send", {"to": "a@b.c", "subject": "hi"})["id"] == "s1"
+    routes[("GET", "/gmail/v1/users/me/messages")] = FakeResp({"messages": []})
+    assert NI.gmail_action("search", {"query": "x"}) == []
+    routes[("GET", "/gmail/v1/users/me/messages/m1")] = FakeResp({
+        "id": "m1", "payload": {"headers": []}})
+    assert NI.gmail_action("get", {"message_id": "m1"})["id"] == "m1"
+
+
+def test_vercel_router_actions(fake_http, vercel_env):
+    routes, _ = fake_http
+    _vercel_projects_route(routes)
+    assert NI.vercel_action("projects", {})[0]["name"] == "site"
+    routes[("GET", "/v6/deployments")] = FakeResp({"deployments": []})
+    assert NI.vercel_action("deployments", {}) == []
+    routes[("GET", "/v9/projects/prj_1")] = FakeResp(
+        {"link": {"type": "github", "repoId": 5}})
+    routes[("POST", "/v13/deployments")] = FakeResp(
+        {"id": "d9", "url": "u", "readyState": "READY"})
+    out = NI.vercel_action("redeploy", {"project": "site"})
+    assert out["id"] == "d9"
+    routes[("GET", "/v9/projects/prj_1/env")] = FakeResp({"envs": []})
+    assert NI.vercel_action("env_vars", {"project": "site"}) == []
+    routes[("POST", "/v10/projects/prj_1/env")] = FakeResp({"id": "e1"})
+    assert NI.vercel_action("set_env", {"project": "site", "key": "K",
+                                        "value": "v"})["id"] == "e1"
+
+
+def test_fal_router_actions(fake_http, fal_env):
+    routes, _ = fake_http
+    routes[("POST", "queue.fal.run/fal-ai/flux-2-dev")] = FakeResp(
+        {"request_id": "r1"})
+    assert NI.fal_action("generate", {"prompt": "x"})["request_id"] == "r1"
+    routes[("GET", "/requests/r1/status")] = FakeResp({"status": "COMPLETED"})
+    assert NI.fal_action("status", {"request_id": "r1"})["status"] == "COMPLETED"
+    routes[("GET", "/requests/r1")] = FakeResp({"images": []})
+    assert NI.fal_action("result", {"request_id": "r1"}) == {"images": []}
+
+
+def test_req_lists_all_missing():
+    with pytest.raises(ValueError, match="missing required arg"):
+        NI._req({}, "a", "b")
+    with pytest.raises(ValueError, match="a, b"):
+        NI._req({"a": "  "}, "a", "b")
+
+
+def test_integration_status_all_off(monkeypatch):
+    for var in ("GITHUB_TOKEN", "GITLAB_TOKEN", "GOOGLE_OAUTH_CLIENT_ID",
+                "GOOGLE_OAUTH_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN",
+                "VERCEL_TOKEN", "FAL_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    assert NI.integration_status() == {
+        "github": False, "gitlab": False, "gmail": False,
+        "vercel": False, "fal": False}
+
+
+def test_env_trims_whitespace(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "  tok  ")
+    assert NI._env("GITHUB_TOKEN") == "tok"
+    assert GitHub.available() is True
+    monkeypatch.setenv("GITHUB_TOKEN", "   ")
+    assert GitHub.available() is False

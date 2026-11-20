@@ -309,3 +309,439 @@ def test_openai_tools_shape():
 
 def test_get_tool_unknown_returns_none():
     assert T.get_tool("does_not_exist") is None
+
+
+# ---------------------------------------------------------------------------
+# _proxy / _pw_proxy / _dns_blocked / _strip_tags
+# ---------------------------------------------------------------------------
+
+def test_proxy_helpers(monkeypatch):
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    assert T._proxy() is None
+    assert T._pw_proxy() is None
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+    assert T._proxy() is None  # loopback ignored
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:pass@proxy.example:8080")
+    assert T._proxy() == "http://user:pass@proxy.example:8080"
+    assert T._pw_proxy() == {"server": "http://proxy.example:8080",
+                             "username": "user", "password": "pass"}
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    assert T._pw_proxy() == {"server": "http://proxy.example:8080"}
+
+
+def test_dns_blocked_direct(monkeypatch):
+    monkeypatch.setattr(T.socket, "getaddrinfo",
+                        lambda h, p, *a, **k: [(2, 1, 6, "", ("8.8.8.8", 0))])
+    assert T._dns_blocked("example.com") is None
+    monkeypatch.setattr(T.socket, "getaddrinfo",
+                        lambda h, p, *a, **k: [(2, 1, 6, "", ("10.1.2.3", 0))])
+    assert "non-public IP" in (T._dns_blocked("example.com") or "")
+    monkeypatch.setattr(T.socket, "getaddrinfo",
+                        lambda h, p, *a, **k: (_ for _ in ()).throw(OSError("nx")))
+    assert T._dns_blocked("example.com") is None
+
+
+def test_strip_tags():
+    assert T._strip_tags("<b>Hi</b> &amp; bye &quot;q&quot;") == 'Hi & bye "q"'
+    assert T._strip_tags("  a   b  ") == "a b"
+
+
+def test_verify_bundle(monkeypatch):
+    monkeypatch.setattr("os.path.isfile", lambda p: True)
+    assert T._verify() == "/etc/ssl/certs/ca-certificates.crt"
+    monkeypatch.setattr("os.path.isfile", lambda p: False)
+    assert T._verify() is True
+
+
+# ---------------------------------------------------------------------------
+# shell_exec / file_* (tmp workdir)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def _tmp_workdir(tmp_path, monkeypatch):
+    monkeypatch.setattr(T, "WORKDIR", str(tmp_path))
+    monkeypatch.setattr(T, "SHOTS_DIR", str(tmp_path / ".shots"))
+    os.makedirs(tmp_path / ".shots", exist_ok=True)
+    return tmp_path
+
+
+def test_shell_exec_success(_tmp_workdir):
+    out = run(T.shell_exec("echo hello"))
+    assert "$ echo hello" in out
+    assert "(exit 0)" in out
+    assert "hello" in out
+
+
+def test_shell_exec_nonzero_exit(_tmp_workdir):
+    out = run(T.shell_exec("exit 3"))
+    assert "(exit 3)" in out
+
+
+def test_shell_exec_timeout(_tmp_workdir):
+    out = run(T.shell_exec("sleep 5", timeout=1))
+    assert out == "[timed out after 1s]"
+
+
+def test_shell_exec_truncates(_tmp_workdir):
+    out = run(T.shell_exec("python3 -c \"print('x'*13000)\""))
+    assert "…[truncated]…" in out
+    assert len(out) < 14000
+
+
+def test_file_write_read_list_delete(_tmp_workdir):
+    assert run(T.file_write("sub/note.txt", "hello world")) == "wrote 11 chars to sub/note.txt"
+    assert run(T.file_read("sub/note.txt")) == "hello world"
+    listing = run(T.file_list("sub"))
+    assert listing == "note.txt"
+    assert run(T.file_list(".")) == ".shots/\nsub/"  # fixture makes .shots/
+    assert run(T.file_delete("sub/note.txt")) == "deleted sub/note.txt"
+    assert "read error" in run(T.file_read("sub/note.txt"))
+
+
+def test_file_read_truncates(_tmp_workdir):
+    run(T.file_write("big.txt", "y" * 300))
+    out = run(T.file_read("big.txt", max_chars=100))
+    assert out.endswith("…[truncated]…")
+    assert len(out) == 100 + len("\n…[truncated]…")
+
+
+def test_file_list_empty_and_missing(_tmp_workdir):
+    os.makedirs(_tmp_workdir / "empty", exist_ok=True)
+    assert run(T.file_list("empty")) == "(empty)"
+    assert "list error" in run(T.file_list("nope"))
+
+
+def test_file_delete_directory(_tmp_workdir):
+    run(T.file_write("d/f.txt", "x"))
+    assert run(T.file_delete("d")) == "deleted d"
+    assert "delete error" in run(T.file_delete("d"))
+
+
+def test_file_ops_reject_escape(_tmp_workdir):
+    assert "read error" in run(T.file_read("../outside.txt"))
+    assert "write error" in run(T.file_write("../outside.txt", "x"))
+
+
+# ---------------------------------------------------------------------------
+# web_fetch edge cases
+# ---------------------------------------------------------------------------
+
+def test_web_fetch_http_error(monkeypatch):
+    _public_dns(monkeypatch)
+    monkeypatch.setattr(T, "_aclient",
+                        _client_returning("", exc=None))
+    # _client_returning with text="" returns a 200 empty body; use a 404 resp.
+    def factory(timeout, **kw):
+        return _FakeClient(lambda url, kw2: _FakeResp("", status_code=404))
+    monkeypatch.setattr(T, "_aclient", factory)
+    out = run(T.web_fetch("https://example.com/missing"))
+    assert out == "HTTP 404 fetching https://example.com/missing"
+
+
+def test_web_fetch_non_html_returns_raw(monkeypatch):
+    _public_dns(monkeypatch)
+    resp = _FakeResp('{"a": 1}')
+    resp.headers = {"content-type": "application/json"}
+    monkeypatch.setattr(T, "_aclient", _client_returning('{"a": 1}'))
+    # _client_returning's resp has text/html headers; patch content-type via factory.
+    def factory(timeout, **kw):
+        return _FakeClient(lambda url, kw2: resp)
+    monkeypatch.setattr(T, "_aclient", factory)
+    out = run(T.web_fetch("https://example.com/api"))
+    assert '{"a": 1}' in out
+    assert "Title:" in out
+
+
+def test_web_fetch_exception(monkeypatch):
+    _public_dns(monkeypatch)
+    monkeypatch.setattr(T, "_aclient",
+                        _client_returning(exc=RuntimeError("conn reset")))
+    out = run(T.web_fetch("https://example.com/"))
+    assert out.startswith("Fetch failed: conn reset")
+
+
+def test_web_fetch_redirect_without_location(monkeypatch):
+    _public_dns(monkeypatch)
+    r = _FakeResp("", status_code=302)
+    r.headers = {}
+    monkeypatch.setattr(T, "_aclient",
+                        _client_returning(""))
+    def factory(timeout, **kw):
+        return _FakeClient(lambda url, kw2: r)
+    monkeypatch.setattr(T, "_aclient", factory)
+    out = run(T.web_fetch("https://example.com/start"))
+    # A redirect with no Location is treated as the final response.
+    assert out.startswith("URL: https://example.com/start")
+
+
+# ---------------------------------------------------------------------------
+# _bing_rss_search / _ddg_search internals
+# ---------------------------------------------------------------------------
+
+def test_bing_rss_http_error(monkeypatch):
+    def factory(timeout, **kw):
+        return _FakeClient(lambda url, kw2: _FakeResp("", status_code=500))
+    monkeypatch.setattr(T, "_aclient", factory)
+    with pytest.raises(RuntimeError, match="bing HTTP 500"):
+        run(T._bing_rss_search("q", 5))
+
+
+def test_bing_rss_skips_items_without_link(monkeypatch):
+    rss = ('<rss><channel>'
+           '<item><title>No link here</title><description>d</description></item>'
+           '<item><title>Good</title><link>https://good.example/</link>'
+           '<description>ok</description></item></channel></rss>')
+    monkeypatch.setattr(T, "_aclient", _client_returning(rss))
+    out = run(T._bing_rss_search("q", 5))
+    assert len(out) == 1 and "Good" in out[0]
+
+
+def test_bing_rss_respects_max_results(monkeypatch):
+    items = "".join(
+        f'<item><title>T{i}</title><link>https://x{i}.example/</link>'
+        f'<description>d{i}</description></item>' for i in range(5))
+    monkeypatch.setattr(T, "_aclient", _client_returning(f"<rss>{items}</rss>"))
+    out = run(T._bing_rss_search("q", 2))
+    assert len(out) == 2
+
+
+def test_ddg_http_error(monkeypatch):
+    def factory(timeout, **kw):
+        return _FakeClient(lambda url, kw2: _FakeResp("", status_code=403))
+    monkeypatch.setattr(T, "_aclient", factory)
+    with pytest.raises(RuntimeError, match="ddg HTTP 403"):
+        run(T._ddg_search("q", 5))
+
+
+def test_ddg_parses_results(monkeypatch):
+    html = ('<a class="result__a" href="https://a.example/">A Title</a>'
+            ' x <a class="result__snippet" href="#">A snip</a>'
+            '<a class="result__a" href="https://b.example/">B Title</a>'
+            ' x <a class="result__snippet" href="#">B snip</a>')
+    monkeypatch.setattr(T, "_aclient", _client_returning(html))
+    out = run(T._ddg_search("q", 1))
+    assert len(out) == 1 and "A Title" in out[0]
+
+
+def test_web_search_bing_empty_falls_to_ddg(monkeypatch):
+    # Bing returns 200 with no items: web_search falls through to DDG.
+    ddg_html = ('<a class="result__a" href="https://ddg.example/">DDG</a>'
+                ' x <a class="result__snippet" href="#">snip</a>')
+
+    def factory(timeout, **kw):
+        def handler(url, kw2):
+            if "bing.com" in url:
+                return _FakeResp("<rss><channel></channel></rss>")
+            return _FakeResp(ddg_html)
+        return _FakeClient(handler)
+    monkeypatch.setattr(T, "_aclient", factory)
+    out = run(T.web_search("q"))
+    assert "DDG" in out
+
+
+# ---------------------------------------------------------------------------
+# _integration_call
+# ---------------------------------------------------------------------------
+
+def test_integration_call_str_passthrough():
+    assert T._integration_call(lambda a, args: "raw text", "x", {}) == "raw text"
+
+
+def test_integration_call_dict_json():
+    out = T._integration_call(lambda a, args: {"k": 1}, "x", {})
+    assert out.strip() == '{\n "k": 1\n}'
+
+
+def test_integration_call_value_error():
+    assert T._integration_call(
+        lambda a, args: (_ for _ in ()).throw(ValueError("no token")),
+        "x", {}).startswith("integration error: no token")
+
+
+def test_integration_call_generic_error():
+    out = T._integration_call(
+        lambda a, args: (_ for _ in ()).throw(RuntimeError("boom")),
+        "x", {})
+    assert out == "integration error: boom"
+
+
+def test_integration_call_unserializable_falls_back_to_str():
+    class Odd:
+        def __str__(self):
+            return "odd-str"
+    # A non-dict, non-str return value that json cannot serialize falls
+    # back to str().
+    out = T._integration_call(lambda a, args: Odd(), "x", {})
+    assert out == "odd-str"
+
+
+# ---------------------------------------------------------------------------
+# screenshot / browser control (stubbed Playwright)
+# ---------------------------------------------------------------------------
+
+class _FakePage:
+    def __init__(self):
+        self.url = "https://example.com/page"
+        self._closed = False
+
+    async def goto(self, url, **kw):
+        self.url = url
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+    async def screenshot(self, path=None, **kw):
+        if path:
+            open(path, "wb").write(b"PNG")
+        return b"PNG"
+
+    async def close(self):
+        self._closed = True
+
+    async def title(self):
+        return "Fake Title"
+
+    async def click(self, selector, **kw):
+        return None
+
+    async def fill(self, selector, text, **kw):
+        return None
+
+    async def inner_text(self, selector):
+        return "page body text"
+
+    def is_closed(self):
+        return self._closed
+
+
+class _FakeBrowser:
+    def __init__(self):
+        self.page = _FakePage()
+
+    async def new_page(self, **kw):
+        return self.page
+
+
+def _stub_browser(monkeypatch):
+    async def fake_get_browser():
+        return _FakeBrowser()
+    monkeypatch.setattr(T, "_get_browser", fake_get_browser)
+
+
+def test_screenshot_page_requires_url_or_html():
+    res = run(T.screenshot_page())
+    assert res == {"ok": False, "error": "url or html_path required"}
+
+
+def test_screenshot_page_missing_html_file(_tmp_workdir):
+    res = run(T.screenshot_page(html_path="nope.html"))
+    assert res["ok"] is False and "no such file" in res["error"]
+
+
+def test_screenshot_page_html_path_escape(_tmp_workdir):
+    res = run(T.screenshot_page(html_path="../outside.html"))
+    assert res["ok"] is False and "escapes workdir" in res["error"]
+
+
+def test_screenshot_page_blocked_url(monkeypatch):
+    res = run(T.screenshot_page(url="http://127.0.0.1/x"))
+    assert res["ok"] is False and res["error"].startswith("Blocked:")
+
+
+def test_screenshot_page_url_success(monkeypatch, _tmp_workdir):
+    _public_dns(monkeypatch)
+    _stub_browser(monkeypatch)
+    res = run(T.screenshot_page(url="https://example.com/"))
+    assert res["ok"] is True
+    assert res["shot"].startswith("page-") and res["shot"].endswith(".png")
+
+
+def test_screenshot_page_html_success(monkeypatch, _tmp_workdir):
+    _public_dns(monkeypatch)
+    _stub_browser(monkeypatch)
+    run(T.file_write("app.html", "<h1>hi</h1>"))
+    res = run(T.screenshot_page(html_path="app.html"))
+    assert res["ok"] is True and res["shot"].endswith(".png")
+
+
+def test_screenshot_page_browser_failure(monkeypatch):
+    _public_dns(monkeypatch)
+    async def boom():
+        raise RuntimeError("chromium down")
+    monkeypatch.setattr(T, "_get_browser", boom)
+    res = run(T.screenshot_page(url="https://example.com/"))
+    assert res["ok"] is False and "screenshot failed" in res["error"]
+
+
+def test_browser_open_blocked(monkeypatch):
+    res = run(T.browser_open("http://169.254.169.254/"))
+    assert res["ok"] is False and res["error"].startswith("Blocked:")
+
+
+def test_browser_open_click_fill_text(monkeypatch, _tmp_workdir):
+    _public_dns(monkeypatch)
+    _stub_browser(monkeypatch)
+    # _get_page uses the same browser stub via _get_browser.
+    async def fake_get_page():
+        return _FakeBrowser().page
+    monkeypatch.setattr(T, "_get_page", fake_get_page)
+    res = run(T.browser_open("https://example.com/"))
+    assert res["ok"] is True and res["title"] == "Fake Title"
+    assert res["shot"] is not None and res["shot"].startswith("browse-")
+    res = run(T.browser_click("#btn"))
+    assert res["ok"] is True
+    res = run(T.browser_fill("#q", "hello"))
+    assert res["ok"] is True
+    assert run(T.browser_text()) == "page body text"
+
+
+def test_browser_open_failure(monkeypatch):
+    _public_dns(monkeypatch)
+    async def boom():
+        raise RuntimeError("no page")
+    monkeypatch.setattr(T, "_get_page", boom)
+    res = run(T.browser_open("https://example.com/"))
+    assert res["ok"] is False and "browser_open failed" in res["error"]
+    res = run(T.browser_click("#x"))
+    assert res["ok"] is False and "browser_click failed" in res["error"]
+    assert run(T.browser_text()).startswith("browser_text failed")
+
+
+def test_page_shot_failure_returns_none(monkeypatch):
+    async def boom():
+        raise RuntimeError("no page")
+    monkeypatch.setattr(T, "_get_page", boom)
+    assert run(T._page_shot("x")) is None
+
+
+# ---------------------------------------------------------------------------
+# Tool registry execute lambdas (end to end through get_tool)
+# ---------------------------------------------------------------------------
+
+def test_tool_execute_lambdas(_tmp_workdir, monkeypatch):
+    _public_dns(monkeypatch)
+    monkeypatch.setattr(T, "_aclient", _client_returning(BING_RSS))
+    shell = T.get_tool("shell_exec")
+    assert "hello" in run(shell["execute"](command="echo hello"))
+    wr = T.get_tool("file_write")
+    assert "wrote" in run(wr["execute"](path="a.txt", content="hi"))
+    rd = T.get_tool("file_read")
+    assert run(rd["execute"](path="a.txt")) == "hi"
+    ls = T.get_tool("file_list")
+    assert "a.txt" in run(ls["execute"]())
+    dl = T.get_tool("file_delete")
+    assert "deleted" in run(dl["execute"](path="a.txt"))
+    ws = T.get_tool("web_search")
+    assert "Result One" in run(ws["execute"](query="q"))
+    shot = T.get_tool("screenshot")
+    res = run(shot["execute"](url="http://127.0.0.1/"))
+    assert res["ok"] is False
+    bt = T.get_tool("browser_text")
+    assert "browser_text failed" in run(bt["execute"]())
+
+
+def test_shot_path_naming(_tmp_workdir):
+    path, name = T._shot_path("page")
+    assert name.startswith("page-") and name.endswith(".png")
+    assert path == os.path.join(str(_tmp_workdir / ".shots"), name)

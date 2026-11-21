@@ -745,3 +745,156 @@ def test_shot_path_naming(_tmp_workdir):
     path, name = T._shot_path("page")
     assert name.startswith("page-") and name.endswith(".png")
     assert path == os.path.join(str(_tmp_workdir / ".shots"), name)
+
+# ---------------------------------------------------------------------------
+# Coverage batch B (2026-11-21): _proxy/_pw_proxy/_aclient edges, shell
+# spawn error, _blocked_url/_dns_blocked edges, _integration_call, and
+# Playwright browser/page setup (fake playwright module — not installed).
+# ---------------------------------------------------------------------------
+
+import sys
+import types
+
+import httpx
+
+
+def test_proxy_malformed_url_returns_none(monkeypatch):
+    # urlparse raises ValueError on a malformed IPv6 proxy URL.
+    for var in ("https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://[::1")
+    assert T._proxy() is None
+
+
+def test_pw_proxy_invalid_port_returns_none(monkeypatch):
+    for var in ("https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:99999")
+    assert T._proxy() == "http://proxy.example:99999"
+    assert T._pw_proxy() is None  # .port raises ValueError -> except
+
+
+def test_aclient_factory_passes_verify_and_proxy(monkeypatch):
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    seen = {}
+
+    class FakeAsyncClient:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    T._aclient(25)
+    assert seen["timeout"] == 25
+    assert seen["proxy"] is None
+    assert seen["trust_env"] is False
+    assert seen["verify"] == T._verify()
+
+
+def test_shell_exec_spawn_error(monkeypatch, _tmp_workdir):
+    def boom(*a, **k):
+        raise RuntimeError("no shell here")
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", boom)
+    assert run(T.shell_exec("echo hi")) == "shell error: no shell here"
+
+
+def test_blocked_url_unparseable(monkeypatch):
+    monkeypatch.setattr(T, "urlparse",
+                        lambda raw: (_ for _ in ()).throw(
+                            ValueError("bad url")))
+    assert T._blocked_url("http://example.com/") == "not a valid URL"
+
+
+def test_dns_blocked_skips_unparseable_ip(monkeypatch):
+    monkeypatch.setattr(T.socket, "getaddrinfo",
+                        lambda h, p, *a, **k: [(2, 1, 6, "", ("not-an-ip", 0))])
+    assert T._dns_blocked("example.com") is None
+
+
+def test_integration_call_generic_exception():
+    def boom(action, arguments):
+        raise KeyError("kaboom")
+    out = T._integration_call(boom, "act", {})
+    assert out.startswith("integration error: ")
+    assert "kaboom" in out
+
+
+class _BatchBFakePage:
+    """Minimal stand-in for a Playwright page (no Chromium launched)."""
+
+    def __init__(self, closed=False):
+        self._closed = closed
+
+    def is_closed(self):
+        return self._closed
+
+
+class _BatchBFakeBrowser:
+    """Minimal stand-in for a Playwright browser (no Chromium launched)."""
+
+    def __init__(self):
+        self.pages = []
+
+    async def new_page(self, viewport=None):
+        page = _BatchBFakePage()
+        self.pages.append(page)
+        return page
+
+
+def _install_fake_playwright(monkeypatch, browser, seen):
+    """Inject fake playwright + playwright.async_api modules (not installed)."""
+    pkg = types.ModuleType("playwright")
+    pkg.__path__ = []
+
+    class _Chromium:
+        async def launch(self, proxy=None, args=None):
+            seen["proxy"] = proxy
+            seen["args"] = args
+            return browser
+
+    class _PW:
+        async def start(self):
+            return self
+
+        @property
+        def chromium(self):
+            return _Chromium()
+
+    api = types.ModuleType("playwright.async_api")
+    api.async_playwright = lambda: _PW()
+    monkeypatch.setitem(sys.modules, "playwright", pkg)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", api)
+
+
+def test_get_browser_launches_once(monkeypatch):
+    import app.forwarder as fwd_mod
+    browser = _BatchBFakeBrowser()
+    seen = {}
+    _install_fake_playwright(monkeypatch, browser, seen)
+
+    async def fake_fwd():
+        return "http://127.0.0.1:18080"
+    monkeypatch.setattr(fwd_mod, "ensure_forwarder", fake_fwd)
+    monkeypatch.setattr(T, "_playwright_browser", None)
+    got = run(T._get_browser())
+    assert got is browser
+    assert seen["proxy"] == {"server": "http://127.0.0.1:18080"}
+    assert seen["args"] == ["--ignore-certificate-errors"]
+    assert browser._pw is not None  # handle kept so it can be stopped later
+    assert run(T._get_browser()) is browser  # cached: no second launch
+
+
+def test_get_page_creates_and_reuses(monkeypatch):
+    browser = _BatchBFakeBrowser()
+
+    async def fake_browser():
+        return browser
+    monkeypatch.setattr(T, "_get_browser", fake_browser)
+    monkeypatch.setattr(T, "_browser_page", None)
+    first = run(T._get_page())
+    assert run(T._get_page()) is first  # cached while open
+    assert len(browser.pages) == 1
+    monkeypatch.setattr(T, "_browser_page", _BatchBFakePage(closed=True))
+    second = run(T._get_page())
+    assert second is not first  # closed page is replaced
+    assert len(browser.pages) == 2

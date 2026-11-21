@@ -871,3 +871,277 @@ def test_verify_returns_bundle_when_present(monkeypatch):
     assert models._verify() == "/etc/ssl/certs/ca-certificates.crt"
     monkeypatch.setattr("os.path.isfile", lambda p: False)
     assert models._verify() is True
+
+# ---------------------------------------------------------------------------
+# Coverage batch B (2026-11-21): leg fallbacks, provider branches, retry
+# progress, _proxy/_client factories, _record_leg never-raise.
+# ---------------------------------------------------------------------------
+
+def test_record_leg_never_raises(monkeypatch):
+    monkeypatch.setattr(models.router_stats, "record",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            RuntimeError("stats down")))
+    models._record_leg("p", "m", "ok", _time.time())  # must not raise
+
+
+def test_proxy_malformed_url_returns_none(monkeypatch):
+    # urlparse raises ValueError on a malformed IPv6 proxy URL.
+    for var in ("https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://[::1")
+    assert models._proxy() is None
+
+
+def test_client_factory_passes_proxy_and_verify(monkeypatch):
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            seen.update(k)
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    models._client(10)
+    assert seen["timeout"] == 10
+    assert seen["proxy"] is None
+    assert seen["trust_env"] is False
+    assert seen["verify"] == models._verify()
+
+
+def test_aclient_factory_passes_proxy_and_verify(monkeypatch):
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    seen = {}
+
+    class FakeAsyncClient:
+        def __init__(self, *a, **k):
+            seen.update(k)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    models._aclient(10)
+    assert seen["timeout"] == 10
+    assert seen["proxy"] is None
+    assert seen["trust_env"] is False
+    assert seen["verify"] == models._verify()
+
+
+def test_pollinations_chat_rate_limit_progress(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, text="slow down")
+        return httpx.Response(200, json=_poll_msg("second try"))
+    _mock_models_client(monkeypatch, handler)
+    seen = []
+    msg = models.pollinations_chat([{"role": "user", "content": "hi"}],
+                                   retries=3, progress=seen.append)
+    assert msg["content"] == "second try"
+    assert any("rate-limited" in s for s in seen)
+
+
+def test_pollinations_chat_network_error_progress(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("boom", request=req)
+        return httpx.Response(200, json=_poll_msg("after blip"))
+    _mock_models_client(monkeypatch, handler)
+    seen = []
+    msg = models.pollinations_chat([{"role": "user", "content": "hi"}],
+                                   retries=3, progress=seen.append)
+    assert msg["content"] == "after blip"
+    assert any("network error" in s for s in seen)
+
+
+def test_horde_generate_progress_and_queue_position(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(req):
+        if req.url.path.endswith("/generate/text/async"):
+            return httpx.Response(200, json={"id": "job-1"})
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"done": False,
+                                             "queue_position": 3})
+        return httpx.Response(200, json={
+            "done": True, "generations": [{"text": "queued then done"}]})
+    _mock_models_client(monkeypatch, handler)
+    seen = []
+    text = models._horde_generate("prompt", 100, 0.7, timeout_s=30,
+                                  progress=seen.append)
+    assert text == "queued then done"
+    assert any("submitting job" in s for s in seen)
+    assert any("waiting for a worker" in s and "queue position 3" in s
+               for s in seen)
+
+
+def test_horde_generate_poll_http_error_retries(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(req):
+        if req.url.path.endswith("/generate/text/async"):
+            return httpx.Response(200, json={"id": "job-1"})
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("poll blip", request=req)
+        return httpx.Response(200, json={
+            "done": True, "generations": [{"text": "after blip"}]})
+    _mock_models_client(monkeypatch, handler)
+    text = models._horde_generate("prompt", 100, 0.7, timeout_s=30)
+    assert text == "after blip"
+
+
+def test_horde_generate_poll_non200_continues(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(req):
+        if req.url.path.endswith("/generate/text/async"):
+            return httpx.Response(200, json={"id": "job-1"})
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500, text="upstream blip")
+        return httpx.Response(200, json={
+            "done": True, "generations": [{"text": "after 500"}]})
+    _mock_models_client(monkeypatch, handler)
+    text = models._horde_generate("prompt", 100, 0.7, timeout_s=30)
+    assert text == "after 500"
+
+
+def test_race_horde_refusal_is_skipped(monkeypatch):
+    _race(monkeypatch,
+          horde=lambda *a, **k: (_ for _ in ()).throw(
+              models._Refusal("nope")),
+          kilo="kilo after refusal")
+    text, source, _, _ = models._race_first_response(
+        [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+    assert text == "kilo after refusal"
+    assert source.startswith("kilo/")
+
+
+def test_race_unknown_provider_leg_fails(monkeypatch):
+    import app.providers as pm
+    _race(monkeypatch)
+    monkeypatch.setattr(pm, "get_provider", lambda name: None)
+    with pytest.raises(RuntimeError, match="All providers failed"):
+        models._race_first_response(
+            [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+
+
+def test_race_fast_provider_refusal_tries_next_model(monkeypatch):
+    import app.providers as pm
+    from types import SimpleNamespace
+    _race(monkeypatch)
+    fake = SimpleNamespace(name="kilo", models=["m1", "m2"])
+    monkeypatch.setattr(pm, "get_provider",
+                        lambda name: fake if name in ("kilo", "llm7") else None)
+    monkeypatch.setattr(
+        pm, "call_provider",
+        lambda p, model, *a, **k: {"content": "I'm sorry, I can't help."})
+    with pytest.raises(RuntimeError, match="All providers failed"):
+        models._race_first_response(
+            [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+
+
+def test_race_pollinations_refusal_skipped(monkeypatch):
+    import app.providers as pm
+    _race(monkeypatch,
+          poll=lambda *a, **k: {"content": "I'm sorry, I can't help."})
+    monkeypatch.setattr(pm, "get_provider", lambda name: None)
+    with pytest.raises(RuntimeError, match="All providers failed"):
+        models._race_first_response(
+            [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+
+
+def test_chat_race_failure_reports_progress(monkeypatch):
+    monkeypatch.setattr(
+        models, "_race_first_response",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(models, "_omni_leg", lambda *a, **k: None)
+    monkeypatch.setattr(
+        models, "pollinations_chat",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("poll down")))
+    monkeypatch.setattr(
+        models, "horde_chat",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("horde down")))
+    seen = []
+    with pytest.raises(RuntimeError, match="all model legs failed"):
+        models.chat([{"role": "user", "content": "hi"}],
+                    progress=seen.append)
+    assert any("Fast race failed" in s for s in seen)
+    assert any("Omni providers exhausted" in s for s in seen)
+    assert any("Pollinations failed" in s for s in seen)
+
+
+def test_chat_omni_leg_error_falls_through(monkeypatch):
+    monkeypatch.setattr(
+        models, "_race_first_response",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(
+        models, "_omni_leg",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("omni boom")))
+    monkeypatch.setattr(models, "pollinations_chat",
+                        lambda *a, **k: {"content": "poll after omni boom"})
+    text, source, _, _, _ = models.chat([{"role": "user", "content": "hi"}])
+    assert text == "poll after omni boom"
+    assert source == "pollinations"
+
+
+def test_chat_pollinations_refusal_progress(monkeypatch):
+    monkeypatch.setattr(
+        models, "_race_first_response",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("race down")))
+    monkeypatch.setattr(models, "_omni_leg", lambda *a, **k: None)
+    monkeypatch.setattr(models, "pollinations_chat",
+                        lambda *a, **k: {"content": "I'm sorry, I can't help."})
+    monkeypatch.setattr(models, "horde_chat",
+                        lambda *a, **k: "horde retry answer")
+    seen = []
+    text, source, _, _, _ = models.chat(
+        [{"role": "user", "content": "hi"}], progress=seen.append)
+    assert text == "horde retry answer"
+    assert source == "horde (retry)"
+    assert any("Pollinations refused" in s for s in seen)
+
+
+def test_omni_leg_stats_failure_still_returns_none(monkeypatch):
+    import app.providers as pm
+    monkeypatch.setattr(models.router_stats, "snapshot",
+                        lambda: (_ for _ in ()).throw(
+                            RuntimeError("stats down")))
+    monkeypatch.setattr(pm, "omni_chain", lambda *a, **k: [])
+    assert models._omni_leg([{"role": "user", "content": "hi"}],
+                            100, 0.7, None, None, "") is None
+
+
+def test_omni_leg_provider_failure_then_success(monkeypatch):
+    import app.providers as pm
+    from types import SimpleNamespace
+    p1 = SimpleNamespace(name="first", label="First")
+    p2 = SimpleNamespace(name="second", label="Second")
+    monkeypatch.setattr(models.router_stats, "snapshot", lambda: [])
+    monkeypatch.setattr(pm, "omni_chain",
+                        lambda *a, **k: [(p1, "m1"), (p2, "m2")])
+
+    def fake_call(p, model, messages, *a, **k):
+        if model == "m1":
+            raise RuntimeError("first down")
+        return {"content": "second works"}
+    monkeypatch.setattr(pm, "call_provider", fake_call)
+    seen = []
+    out = models._omni_leg([{"role": "user", "content": "hi"}],
+                           100, 0.7, None, seen.append, "")
+    assert out is not None
+    assert out[0] == "second works"
+    assert out[1] == "second/m2"
+    assert any("failed — trying next provider" in s for s in seen)
+
+def test_refusal_skipping_off_returns_first_answer_as_is(monkeypatch):
+    # guard_policy SKIP_REFUSALS off: even a canonical refusal is returned.
+    monkeypatch.setattr("app.guard_policy.SKIP_REFUSALS", False)
+    assert models.looks_like_refusal("I'm sorry, I can't help with that.") is False
+    assert models.looks_like_refusal("here is the answer") is False

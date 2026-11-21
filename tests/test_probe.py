@@ -8,6 +8,7 @@ skip-not-live, refusal detection, CLI) is what's under test.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -160,3 +161,66 @@ def test_cli_exit_code_on_failure(monkeypatch):
                         lambda *a, **k: {"content": _refuse_text("")})
     rc = probe_mod.main(["--model", "pollinations:openai"])
     assert rc == 1
+
+
+def test_probe_one_model_unknown_provider_sets_error():
+    # _probe_via_provider raises before the probe loop; probe_one_model
+    # catches it as a provider-level failure, not a refusal.
+    entry = probe_mod.probe_one_model("nosuch", "nosuch:m")
+    assert entry["passed"] == 0 and entry["probes"] == []
+    assert "unknown provider nosuch" in entry["error"]
+
+
+def test_run_probe_text_empty_response():
+    assert probe_mod._run_probe_text("p", lambda _p: "") == (
+        "", "ERROR: empty response")
+    assert probe_mod._run_probe_text("p", lambda _p: "   ") == (
+        "", "ERROR: empty response")
+    assert probe_mod._run_probe_text("p", lambda _p: None) == (
+        "", "ERROR: empty response")
+
+
+def test_probe_via_pollinations_error_recorded(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("pollinations down")
+    monkeypatch.setattr(models, "pollinations_chat", boom)
+    entry = probe_mod.probe_one_model("pollinations", "pollinations:openai")
+    assert entry["passed"] == 0
+    assert all(p["detail"] == "ERROR: pollinations down"
+               for p in entry["probes"])
+    assert "pollinations down" in entry["error"]
+
+
+def test_probe_via_provider_error_recorded(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("leg down")
+    monkeypatch.setattr(providers_mod, "call_provider", boom)
+    entry = probe_mod.probe_one_model("llm7", "llm7:codestral-latest")
+    assert entry["passed"] == 0
+    assert all(p["detail"] == "ERROR: leg down" for p in entry["probes"])
+    assert "leg down" in entry["error"]
+
+
+def test_summarize_lists_skipped_models(stub_all_ok):
+    report = probe_mod.run_suite()
+    assert any(s["id"].startswith("groq:") for s in report["skipped"])
+    assert "  [SKIP] groq:" in probe_mod.summarize(report)
+
+
+def test_main_block_exits_without_probing(monkeypatch):
+    # Covers `if __name__ == "__main__": sys.exit(main())`: re-execute
+    # the module as __main__ with no models listed, so the suite probes
+    # nothing and exits 1 — no network touched.
+    import runpy
+    import warnings
+    monkeypatch.setattr(providers_mod, "list_models", lambda: [])
+    monkeypatch.setattr(sys, "argv", ["probe"])
+    with warnings.catch_warnings():
+        # runpy warns that app.probe is already imported; expected here
+        # — the re-execution is the behaviour under test.
+        warnings.filterwarnings(
+            "ignore", message=".*found in sys.modules.*",
+            category=RuntimeWarning)
+        with pytest.raises(SystemExit) as exc:
+            runpy.run_module("app.probe", run_name="__main__")
+    assert exc.value.code == 1

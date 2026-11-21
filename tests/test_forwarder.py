@@ -311,3 +311,108 @@ def test_handle_plain_http_bad_target_keeps_path(monkeypatch):
                        b"GET not-a-url HTTP/1.1\r\nHost: x\r\n\r\n")
     run(scenario())
     assert seen[0].decode("latin1").split("\r\n")[0] == "GET not-a-url HTTP/1.1"
+
+
+# ---------------------------------------------------------------------------
+# _pipe / _handle — direct fault-injection (no sockets needed)
+# ---------------------------------------------------------------------------
+
+class _EOFReader:
+    """A reader already at EOF (client closed before sending a head)."""
+
+    async def read(self, n=-1):
+        return b""
+
+
+class _BoomReader:
+    async def read(self, n=-1):
+        raise RuntimeError("read boom")
+
+
+class _SinkWriter:
+    """Collects writes; close() only fails when told to."""
+
+    def __init__(self, fail_close=False):
+        self.written = b""
+        self.closed = False
+        self.fail_close = fail_close
+
+    def write(self, data):
+        self.written += data
+
+    async def drain(self):
+        return None
+
+    def close(self):
+        self.closed = True
+        if self.fail_close:
+            raise RuntimeError("close boom")
+
+
+def test_pipe_read_error_swallowed():
+    w = _SinkWriter()
+    run(forwarder._pipe(_BoomReader(), w))
+    assert w.closed is True
+
+
+def test_pipe_close_error_swallowed():
+    # The finally: close() in _pipe must not raise when the peer is gone.
+    run(forwarder._pipe(_EOFReader(), _SinkWriter(fail_close=True)))
+
+
+def test_handle_client_closes_before_head():
+    w = _SinkWriter()
+    run(forwarder._handle(_EOFReader(), w))
+    assert w.closed is True and w.written == b""
+
+
+def test_handle_close_error_swallowed():
+    # The finally: close() in _handle must not raise either.
+    run(forwarder._handle(_EOFReader(), _SinkWriter(fail_close=True)))
+
+
+def test_handle_connect_partial_response_then_close(monkeypatch):
+    async def upstream(reader, writer):
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = await reader.read(4096)
+            if not chunk:
+                writer.close()
+                return
+            head += chunk
+        # Partial status line, no blank line, then die: the forwarder's
+        # CONNECT-response read loop must break on EOF, not hang.
+        writer.write(b"HTTP/1.1 200 Connection Established\r\n")
+        await writer.drain()
+        writer.close()
+
+    async def scenario():
+        out, _ = await _run_fwd(upstream, monkeypatch,
+                                b"CONNECT example.com:443 HTTP/1.1\r\n"
+                                b"Host: example.com:443\r\n\r\n",
+                                read_all=False)
+        assert b"200 Connection Established" in out
+    run(scenario())
+
+
+def test_handle_plain_http_invalid_ipv6_target(monkeypatch):
+    # urlparse raises ValueError on a bare "http://[::1" target; the
+    # forwarder falls back to "/" instead of dropping the request.
+    seen = []
+
+    async def upstream(reader, writer):
+        head = b""
+        while b"\r\n\r\n" not in head:
+            chunk = await reader.read(4096)
+            if not chunk:
+                writer.close()
+                return
+            head += chunk
+        seen.append(head)
+        writer.close()
+
+    async def scenario():
+        await _run_fwd(upstream, monkeypatch,
+                       b"GET http://[::1 HTTP/1.1\r\nHost: x\r\n\r\n")
+    run(scenario())
+    assert seen[0].decode("latin1").split("\r\n")[0] == "GET / HTTP/1.1"

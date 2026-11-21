@@ -221,3 +221,32 @@ def test_record_never_raises_on_db_failure(monkeypatch):
     # only the write path is best-effort, so a probe run never breaks.
     with pytest.raises(OSError):
         hist.latest_per_model()
+
+
+def _corrupt_probes_json(db_path):
+    """Rewrite every stored probes payload as invalid JSON."""
+    import sqlite3
+    c = sqlite3.connect(db_path)
+    c.execute("UPDATE probe_results SET probes='not json{'")
+    c.commit()
+    c.close()
+
+
+def test_latest_per_model_tolerates_bad_probes_json(tmpdb):
+    tmpdb.record_run(_report())
+    _corrupt_probes_json(tmpdb.DB)
+    (row,) = tmpdb.latest_per_model()
+    assert row["probes"] == []
+
+
+def test_run_detail_tolerates_bad_probes_json(tmpdb):
+    run_id = tmpdb.record_run(_report())
+    _corrupt_probes_json(tmpdb.DB)
+    assert tmpdb.run_detail(run_id)["results"][0]["probes"] == []
+
+
+def test_model_history_tolerates_bad_probes_json(tmpdb):
+    tmpdb.record_run(_report())
+    _corrupt_probes_json(tmpdb.DB)
+    (row,) = tmpdb.model_history("llm7:codestral-latest")
+    assert row["probes"] == []

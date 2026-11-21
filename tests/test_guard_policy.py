@@ -15,6 +15,8 @@ Proofs:
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import guard_policy  # noqa: E402
@@ -127,3 +129,27 @@ def test_config_exposes_no_hard_floor_controls():
     flat = " ".join(names).lower()
     for forbidden in ("hard", "boundary_list", "guards", "access_code"):
         assert forbidden not in flat
+
+
+# ---------------------------------------------------------------------------
+# _bool_env — the switch parser behind SKIP_REFUSALS / UNCENSORED_FIRST
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("1", True), ("TRUE", True), ("yes", True), ("on", True),
+    ("0", False), ("FALSE", False), ("no", False), ("off", False),
+])
+def test_bool_env_parses_switch_values(monkeypatch, raw, expected):
+    # The fallback is the opposite value, so the result must come from
+    # the env var, not the default.
+    monkeypatch.setenv("GUARD_SKIP_REFUSALS", raw)
+    assert guard_policy._bool_env("GUARD_SKIP_REFUSALS", not expected) is expected
+
+
+def test_bool_env_unknown_and_unset_fall_back(monkeypatch):
+    monkeypatch.setenv("GUARD_SKIP_REFUSALS", "maybe")
+    assert guard_policy._bool_env("GUARD_SKIP_REFUSALS", True) is True
+    assert guard_policy._bool_env("GUARD_SKIP_REFUSALS", False) is False
+    monkeypatch.delenv("GUARD_SKIP_REFUSALS")
+    assert guard_policy._bool_env("GUARD_SKIP_REFUSALS", True) is True
+    assert guard_policy._bool_env("GUARD_SKIP_REFUSALS", False) is False

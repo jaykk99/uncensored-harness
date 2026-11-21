@@ -68,6 +68,12 @@ def _parse_fenced_calls(text: str) -> tuple[str, list[dict]]:
             obj = json.loads(m.group(1).strip())
         except Exception:
             continue
+        if not isinstance(obj, dict):
+            # Valid JSON but not a tool-call object (a list, a bare
+            # string, a number). A model that fences one of those used
+            # to crash the whole turn here with AttributeError on
+            # .get — skip it like any other malformed block instead.
+            continue
         if obj.get("name"):
             calls.append({"id": f"call_{uuid.uuid4().hex[:8]}",
                           "name": obj["name"],

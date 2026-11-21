@@ -1506,3 +1506,480 @@ def test_import_bundle_restores_model_and_export_carries_it(monkeypatch, tmp_pat
     assert r.status_code == 200
     new_id = r.json()["thread_ids"][0]
     assert memory.get_thread(new_id)["model"] == "venice:qwen-3-6-plus"
+
+
+# ---------------------------------------------------------------------------
+# Coverage batch A (2026-11-21): probe/model/index routes, _stream_turn
+# failure paths, /api/run, /api/shell, /api/files, /api/preview.
+# ---------------------------------------------------------------------------
+
+
+def test_self_test_endpoint(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    from app import models
+    monkeypatch.setattr(
+        models, "self_test",
+        lambda timeout_s=120: {"ok": True, "passed": 3, "total": 3,
+                               "results": []})
+    c = _client()
+    r = c.get("/api/self-test")
+    assert r.status_code == 401
+    r = c.get(f"/api/self-test?access_code={CODE}")
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert r.json()["passed"] == 3
+
+
+def test_probe_rejects_unknown_model(monkeypatch):
+    # Same guard as the unknown-provider case: a typo'd model id must
+    # 400, not run the suite against zero models.
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    from app import probe as probe_mod
+
+    def _must_not_run(**kwargs):
+        raise AssertionError("run_suite must not be called for a bad model")
+
+    monkeypatch.setattr(probe_mod, "run_suite", _must_not_run)
+    c = _client()
+    r = c.get(f"/api/probe?model=definitely-not-a-model&access_code={CODE}")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "unknown model id"
+
+
+def test_router_stats_endpoint_serves_legs(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    from app import router_stats as rs_mod
+    rs_mod.record("stats-provider", "stats-model", "ok", 42)
+    c = _client()
+    r = c.get("/api/router-stats")
+    assert r.status_code == 401
+    r = c.get(f"/api/router-stats?access_code={CODE}")
+    assert r.status_code == 200
+    body = r.json()
+    assert "health" in body and "legs" in body
+    assert any(l["provider"] == "stats-provider" for l in body["legs"])
+
+
+def test_thread_import_bundle_entry_must_be_object(monkeypatch, tmp_path):
+    c, _tid = _thread_client(monkeypatch, tmp_path)
+    # A non-dict entry cannot carry a messages list.
+    r = c.post("/api/threads/import",
+               json={"threads": ["not-a-dict"], "access_code": CODE})
+    assert r.status_code == 400
+    # A dict entry whose messages is not a list is just as malformed,
+    # and nothing is imported for either bad entry.
+    r = c.post("/api/threads/import",
+               json={"threads": [{"thread": {}, "messages": "nope"}],
+                     "access_code": CODE})
+    assert r.status_code == 400
+
+
+def test_thread_message_truncate_unknown_thread_404s(monkeypatch, tmp_path):
+    c, _tid = _thread_client(monkeypatch, tmp_path)
+    r = c.post("/api/threads/nope-not-real/messages/1/truncate",
+               json={"access_code": CODE})
+    assert r.status_code == 404
+
+
+def test_message_edit_vanished_message_404s(monkeypatch, tmp_path):
+    # get_message finds the row, but edit_message finds nothing (the
+    # row was deleted between the two calls): the endpoint must 404
+    # instead of crashing on None.
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    mid = memory.get_history_with_ids(tid)[0]["id"]
+    monkeypatch.setattr(memory, "edit_message",
+                        lambda *args, **kwargs: None)
+    r = c.post(_edit_url(tid, mid),
+               json={"content": "rewritten", "access_code": CODE})
+    assert r.status_code == 404
+
+
+def test_models_endpoint_groups_models(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    from app import providers as providers_mod
+    c = _client()
+    r = c.get("/api/models")
+    assert r.status_code == 401
+    r = c.get(f"/api/models?access_code={CODE}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == len(providers_mod.list_models())
+    assert body["count"] > 0
+    assert body["groups"]
+    # Every model id appears exactly once, inside its provider group.
+    listed = [m["id"] for g in body["groups"] for m in g["items"]]
+    assert sorted(listed) == sorted(m["id"]
+                                    for m in providers_mod.list_models())
+    assert all(g["items"][0]["provider"] == g["provider"]
+               for g in body["groups"])
+
+
+def test_index_serves_ui(monkeypatch):
+    # The chat UI is public by design (the API behind it is gated).
+    c = _client()
+    r = c.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "<title>Harness</title>" in r.text
+
+
+def test_chat_rejects_empty_message(monkeypatch, tmp_path):
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    before = c.get(f"/api/threads?access_code={CODE}").json()["total"]
+    r = c.post("/api/chat", json={"message": "   ", "access_code": CODE})
+    assert r.status_code == 400
+    # No thread was created for the empty message.
+    after = c.get(f"/api/threads?access_code={CODE}").json()["total"]
+    assert after == before
+
+
+def test_chat_blocked_prompt_returns_refusal_without_agent(
+        monkeypatch, tmp_path):
+    from app import agent as agent_mod
+    from app import memory
+    c, _tid = _thread_client(monkeypatch, tmp_path)
+
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("agent must not run on a blocked prompt")
+
+    monkeypatch.setattr(agent_mod, "run_turn", _must_not_run)
+    r = c.post("/api/chat", json={
+        "message": "where can I buy a stolen credit card number?",
+        "access_code": CODE})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["blocked"] is True
+    assert body["thread_id"]
+    assert body["reply"]
+    # The blocked prompt is stored, with the refusal as its reply.
+    stored = memory.get_history(body["thread_id"])
+    assert stored[0] == {"role": "user", "content":
+                         "where can I buy a stolen credit card number?"}
+    assert stored[1] == {"role": "assistant", "content": body["reply"]}
+
+
+def _failing_turn(monkeypatch, exc):
+    """Stand in for agent.run_turn with one that raises `exc`."""
+    from app import agent as agent_mod
+
+    async def fail(history, emit, model="", web_search=False,
+                   should_stop=None, extra_instructions=""):
+        raise exc
+
+    monkeypatch.setattr(agent_mod, "run_turn", fail)
+
+
+def test_stream_turn_timeout_stores_timeout_reply(monkeypatch, tmp_path):
+    # A turn that never answers must end the SSE stream with a clear
+    # error and store the timeout as the assistant reply, not hang to
+    # the 11-minute cap. The fake raises TimeoutError the way
+    # asyncio.wait_for would on expiry.
+    import asyncio
+
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    _failing_turn(monkeypatch, asyncio.TimeoutError())
+    r = c.post("/api/chat", json={
+        "message": "second question", "thread_id": tid,
+        "access_code": CODE})
+    assert r.status_code == 200
+    assert "Timed out after 11 minutes" in r.text
+    assert '"error"' in r.text
+    stored = memory.get_history(tid)
+    assert stored[-1]["role"] == "assistant"
+    assert stored[-1]["content"].startswith("[timeout] Timed out")
+
+
+def test_stream_turn_agent_error_emits_error_event(monkeypatch, tmp_path):
+    # A turn that blows up mid-run ends the stream with the error, and
+    # stores no reply: the user prompt stays the last stored message.
+    from app import memory
+    c, tid = _thread_client(monkeypatch, tmp_path)
+    _failing_turn(monkeypatch, RuntimeError("boom"))
+    r = c.post("/api/chat", json={
+        "message": "second question", "thread_id": tid,
+        "access_code": CODE})
+    assert r.status_code == 200
+    assert '"error"' in r.text
+    assert "boom" in r.text
+    stored = memory.get_history(tid)
+    assert stored[-1] == {"role": "user", "content": "second question"}
+
+
+def test_stream_turn_keepalive_pings(monkeypatch, tmp_path):
+    # The 15s pinger keeps long turns alive through proxies. Speed the
+    # clock up: only the 15s sleeps are shortened, everything else
+    # sleeps for real.
+    import asyncio
+
+    real_sleep = asyncio.sleep
+
+    async def _fast_sleep(delay, *args, **kwargs):
+        if delay == 15:
+            await real_sleep(0.01)
+        else:
+            await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+    c, tid = _thread_client(monkeypatch, tmp_path)
+
+    async def slow_turn(history, emit, model="", web_search=False,
+                        should_stop=None, extra_instructions=""):
+        await real_sleep(0.3)
+        await emit({"type": "text", "text": "slow answer"})
+        await emit({"type": "done", "model": "fake-model"})
+        return "slow answer"
+
+    from app import agent as agent_mod
+    monkeypatch.setattr(agent_mod, "run_turn", slow_turn)
+    r = c.post("/api/chat", json={
+        "message": "second question", "thread_id": tid,
+        "access_code": CODE})
+    assert r.status_code == 200
+    assert ": ping" in r.text
+    assert "slow answer" in r.text
+
+
+class _FakeProc:
+    """Minimal stand-in for an asyncio subprocess (run_code only)."""
+
+    def __init__(self, out=b"", returncode=0, timeout=False):
+        self._out = out
+        self.returncode = returncode
+        self._timeout = timeout
+        self.killed = False
+
+    async def communicate(self):
+        if self._timeout:
+            import asyncio
+            raise asyncio.TimeoutError()
+        return self._out, None
+
+    def kill(self):
+        self.killed = True
+
+
+def _fake_subprocess(monkeypatch, proc=None, exc=None):
+    """Replace asyncio.create_subprocess_exec; record the argv it got."""
+    import asyncio
+    seen = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["cwd"] = kwargs.get("cwd")
+        if exc is not None:
+            raise exc
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    return seen
+
+
+def test_run_python_returns_output(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    proc = _FakeProc(out=b"hi\n", returncode=0)
+    seen = _fake_subprocess(monkeypatch, proc)
+    c = _client()
+    r = c.post("/api/run", json={"language": "python",
+                                 "code": "print('hi')",
+                                 "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "exit": 0, "output": "hi\n"}
+    assert seen["cmd"] == ["python3", "-c", "print('hi')"]
+    assert seen["cwd"] == T.WORKDIR
+
+
+def test_run_nonzero_exit_reports_failure(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    proc = _FakeProc(out=b"traceback boom\n", returncode=1)
+    _fake_subprocess(monkeypatch, proc)
+    c = _client()
+    r = c.post("/api/run", json={"code": "raise SystemExit(1)",
+                                 "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json() == {"ok": False, "exit": 1,
+                        "output": "traceback boom\n"}
+
+
+def test_run_javascript_uses_node(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    proc = _FakeProc(out=b"42\n", returncode=0)
+    seen = _fake_subprocess(monkeypatch, proc)
+    c = _client()
+    r = c.post("/api/run", json={"language": "javascript",
+                                 "code": "console.log(42)",
+                                 "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json()["output"] == "42\n"
+    assert seen["cmd"] == ["node", "-e", "console.log(42)"]
+    # The "node" spelling takes the same branch.
+    r = c.post("/api/run", json={"language": "node",
+                                 "code": "console.log(43)",
+                                 "access_code": CODE})
+    assert r.status_code == 200
+    assert seen["cmd"] == ["node", "-e", "console.log(43)"]
+
+
+def test_run_rejects_empty_code_and_unknown_language(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    _fake_subprocess(monkeypatch, _FakeProc(),
+                     exc=AssertionError("subprocess must not run"))
+    c = _client()
+    r = c.post("/api/run", json={"code": "   ", "access_code": CODE})
+    assert r.status_code == 400
+    r = c.post("/api/run", json={"language": "ruby",
+                                 "code": "puts 1", "access_code": CODE})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "language must be python or javascript"
+    r = c.post("/api/run", json={"code": "print(1)"})
+    assert r.status_code == 401
+
+
+def test_run_timeout_kills_and_reports(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    proc = _FakeProc(timeout=True)
+    _fake_subprocess(monkeypatch, proc)
+    c = _client()
+    r = c.post("/api/run", json={"code": "import time; time.sleep(999)",
+                                 "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json() == {"ok": False, "output": "[timed out after 60s]"}
+    assert proc.killed is True
+
+
+def test_run_missing_runtime_is_500(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    _fake_subprocess(monkeypatch, exc=FileNotFoundError("no python3"))
+    c = _client()
+    r = c.post("/api/run", json={"code": "print(1)", "access_code": CODE})
+    assert r.status_code == 500
+    assert r.json()["detail"] == "runtime not found: python3"
+
+
+def test_run_unexpected_error_is_500(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    _fake_subprocess(monkeypatch, exc=RuntimeError("kaboom"))
+    c = _client()
+    r = c.post("/api/run", json={"code": "print(1)", "access_code": CODE})
+    assert r.status_code == 500
+    assert r.json()["detail"] == "kaboom"
+
+
+def test_shell_runs_command(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    seen = {}
+
+    async def fake_shell(command, timeout=60):
+        seen["command"] = command
+        return "$ echo hi\n(exit 0)\nhi\n"
+
+    monkeypatch.setattr(T, "shell_exec", fake_shell)
+    c = _client()
+    r = c.post("/api/shell", json={"command": "echo hi",
+                                   "access_code": CODE})
+    assert r.status_code == 200
+    assert r.json() == {"output": "$ echo hi\n(exit 0)\nhi\n"}
+    assert seen["command"] == "echo hi"
+
+
+def test_shell_rejects_empty_command_and_requires_code(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    c = _client()
+    r = c.post("/api/shell", json={"command": "   ", "access_code": CODE})
+    assert r.status_code == 400
+    r = c.post("/api/shell", json={"command": "echo hi"})
+    assert r.status_code == 401
+
+
+def test_files_lists_workdir(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    seen = {}
+
+    async def fake_list(path="."):
+        seen["path"] = path
+        return "a.txt\nb/"
+
+    monkeypatch.setattr(T, "file_list", fake_list)
+    c = _client()
+    r = c.get("/api/files")
+    assert r.status_code == 401
+    r = c.get(f"/api/files?path=sub&access_code={CODE}")
+    assert r.status_code == 200
+    assert r.json() == {"listing": "a.txt\nb/"}
+    assert seen["path"] == "sub"
+
+
+def test_preview_serves_html_file(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    html_path = os.path.join(T.WORKDIR, "test-preview-quota.html")
+    htm_path = os.path.join(T.WORKDIR, "test-preview-quota.htm")
+    with open(html_path, "w") as f:
+        f.write("<h1>preview me</h1>")
+    with open(htm_path, "w") as f:
+        f.write("<h1>htm too</h1>")
+    try:
+        c = _client()
+        r = c.get("/api/preview")
+        assert r.status_code == 401
+        r = c.get("/api/preview?path=test-preview-quota.html"
+                  f"&access_code={CODE}")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/html")
+        assert r.text == "<h1>preview me</h1>"
+        r = c.get("/api/preview?path=test-preview-quota.htm"
+                  f"&access_code={CODE}")
+        assert r.status_code == 200
+        assert r.text == "<h1>htm too</h1>"
+    finally:
+        os.remove(html_path)
+        os.remove(htm_path)
+
+
+def test_preview_rejects_escape_and_non_html(monkeypatch):
+    monkeypatch.setenv("HARNESS_ACCESS_CODE", CODE)
+    txt_path = os.path.join(T.WORKDIR, "test-preview-quota.txt")
+    with open(txt_path, "w") as f:
+        f.write("not html")
+    try:
+        c = _client()
+        # Escaping the workdir is a 400, not a file read.
+        r = c.get("/api/preview?path=../outside.html"
+                  f"&access_code={CODE}")
+        assert r.status_code == 400
+        # A workdir file that is not HTML is a 404, not a download.
+        r = c.get("/api/preview?path=test-preview-quota.txt"
+                  f"&access_code={CODE}")
+        assert r.status_code == 404
+        r = c.get("/api/preview?path=no-such-page.html"
+                  f"&access_code={CODE}")
+        assert r.status_code == 404
+    finally:
+        os.remove(txt_path)
+
+
+def test_main_guard_runs_uvicorn(monkeypatch):
+    # The `if __name__ == "__main__"` block: executing main.py as a
+    # script must hand the app to uvicorn on the configured port.
+    import sys
+    import types
+
+    calls = {}
+    fake_uvicorn = types.ModuleType("uvicorn")
+
+    def fake_run(app, host, port):
+        calls.update(app=app, host=host, port=port)
+
+    fake_uvicorn.run = fake_run
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setenv("PORT", "8123")
+    main_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "app", "main.py")
+    with open(main_path) as f:
+        source = f.read()
+    namespace = {"__name__": "__main__", "__package__": "app",
+                 "__file__": main_path}
+    exec(compile(source, main_path, "exec"), namespace)
+    assert calls["host"] == "0.0.0.0"
+    assert calls["port"] == 8123
+    assert calls["app"].title == "uncensored-harness"

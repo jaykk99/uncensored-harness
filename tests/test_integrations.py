@@ -137,6 +137,15 @@ def test_github_create_issue_requires_title(fake_http, gh_env):
         NI.github_action("create_issue", {"owner_repo": "o/r", "title": "  "})
 
 
+def test_github_create_issue_blank_title_direct():
+    # The router's _req() rejects a blank title before create_issue is
+    # reached, so the classmethod's own guard needs a direct call.
+    with pytest.raises(ValueError, match="issue title is required"):
+        GitHub.create_issue("o/r", "   ")
+    with pytest.raises(ValueError, match="issue title is required"):
+        GitHub.create_issue("o/r", "")
+
+
 def test_github_dispatch(fake_http, gh_env):
     routes, _ = fake_http
     routes[("POST", "/repos/o/r/actions/workflows/ci.yml/dispatches")] = FakeResp({})

@@ -1005,3 +1005,34 @@ def test_old_db_without_model_column_migrates(memdb, tmp_path, monkeypatch):
     assert memdb.get_thread("oldthreadid4")["model"] == (
         "koboldcpp/L3-8B-Stheno-v3.2")
     assert memdb.list_threads()[0]["model"] == "koboldcpp/L3-8B-Stheno-v3.2"
+
+
+def test_list_archived_threads_page_unknown_cursor(memdb):
+    tid = memdb.create_thread("archived one")
+    memdb.set_thread_archived(tid, True)
+    memdb.create_thread("not archived")
+    page = memdb.list_archived_threads_page(before_id="nope-not-real")
+    assert page == {"threads": [], "total": 1,
+                    "has_more": False, "next_before_id": None}
+
+
+def test_search_thread_messages_snippet_fallback_on_unicode_mismatch(memdb):
+    # SQLite LIKE is ASCII-only case-insensitive, so "%ΣΣ%" matches
+    # "ΣΣΑ"; Python's lower() turns a word-final Σ into ς, so
+    # "ΣΣ".lower() ("σς") is not found in "ΣΣΑ".lower() ("σσα") and
+    # the snippet falls back to the message head instead of windowing.
+    tid = memdb.create_thread("greek")
+    memdb.add_message(tid, "user", "ΣΣΑ is the word")
+    res = memdb.search_thread_messages(tid, "ΣΣ")
+    assert res["total"] == 1
+    assert res["matches"][0]["snippet"] == "ΣΣΑ is the word"
+
+
+def test_search_all_messages_snippet_fallback_on_unicode_mismatch(memdb):
+    # Same LIKE-vs-lower() divergence as the per-thread search, on the
+    # cross-thread path.
+    tid = memdb.create_thread("greek")
+    memdb.add_message(tid, "user", "ΣΣΑ is the word")
+    res = memdb.search_all_messages("ΣΣ")
+    assert res["total"] == 1
+    assert res["matches"][0]["snippet"] == "ΣΣΑ is the word"

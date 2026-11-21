@@ -269,3 +269,29 @@ def test_last_error_migrates_old_db(tmp_path, monkeypatch):
     rs.record("kilo", "m", "error", 50, detail="kilo HTTP 500: boom")
     (row,) = rs.snapshot()
     assert row["last_error"] == "kilo HTTP 500: boom"
+
+
+# ---------------------------------------------------------------------------
+# Remaining lines: bad env, empty percentiles, single-leg reset
+# ---------------------------------------------------------------------------
+
+def test_stale_after_invalid_env_falls_back(monkeypatch):
+    monkeypatch.setenv("ROUTER_STALE_HOURS", "not-a-number")
+    assert rs._stale_after_s() == 24 * 3600
+
+
+def test_percentile_empty_sample_is_zero():
+    assert rs._percentile([], 50) == 0
+    assert rs._percentile([], 95) == 0
+
+
+def test_reset_single_leg():
+    rs.record("kilo", "a", "ok", 100)
+    rs.record("kilo", "b", "ok", 200)
+    assert rs.reset(provider="kilo", model="a") == 1
+    assert [r["model"] for r in rs.snapshot()] == ["b"]
+    # The cleared leg's latency samples go with it.
+    c = rs._conn()
+    n = c.execute("SELECT COUNT(*) FROM router_lat WHERE model='a'").fetchone()[0]
+    c.close()
+    assert n == 0

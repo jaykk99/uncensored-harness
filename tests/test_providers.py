@@ -252,6 +252,16 @@ def test_horde_entries_marked_uncensored():
     assert horde and all(m["uncensored"] and m["keyless"] for m in horde)
 
 
+def test_list_models_skips_horde_when_import_fails(monkeypatch):
+    # list_models guards the Horde import so a broken models module
+    # still lists the other providers instead of crashing the picker.
+    from app import models as models_mod
+    monkeypatch.delattr(models_mod, "HORDE_UNCENSORED_MODELS")
+    ms = list_models()
+    assert not any(m["provider"] == "horde" for m in ms)
+    assert any(m["provider"] == "llm7" for m in ms)
+
+
 def test_pollinations_fallback_present():
     ids = [m["id"] for m in list_models()]
     assert "pollinations:openai" in ids
@@ -411,6 +421,23 @@ def test_call_openai_streaming_via_on_token(monkeypatch):
         [{"role": "user", "content": "hi"}], on_token=seen.append)
     assert msg["content"] == "hello"
     assert seen == ["hel", "lo"]
+
+
+def test_call_openai_streaming_on_token_error_swallowed(monkeypatch):
+    # A failing on_token callback must not lose the streamed reply.
+    sse = ('data: {"choices": [{"delta": {"content": "hel"}}]}\n\n'
+           'data: {"choices": [{"delta": {"content": "lo"}}]}\n\n'
+           'data: [DONE]\n\n')
+    _mock_client(monkeypatch, providers,
+                 lambda req: httpx.Response(200, content=sse.encode()))
+
+    def boom(piece):
+        raise RuntimeError("ui gone")
+
+    msg = providers.call_openai_compatible(
+        get_provider("kilo"), "kilo-auto/free",
+        [{"role": "user", "content": "hi"}], on_token=boom)
+    assert msg["content"] == "hello"
 
 
 def test_stream_accumulates_tool_calls(monkeypatch):

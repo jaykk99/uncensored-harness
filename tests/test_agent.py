@@ -7,7 +7,9 @@ test needs them. Async is driven with tests.conftest.run.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 import pytest
 
@@ -433,3 +435,54 @@ def test_run_turn_sync_tool_result(monkeypatch):
     assert out == "listed"
     res = [e for e in seen if e["type"] == "tool_result"][0]
     assert res["output"] == "sync result"
+
+
+# ---------------------------------------------------------------------------
+# run_turn — progress/token bridge failure modes (best-effort by design)
+# ---------------------------------------------------------------------------
+
+class _SlowStub(_ChatStub):
+    """Like _ChatStub, but lingers in the worker thread after firing the
+    progress/token callbacks, so the event loop gets to run the bridged
+    emits (and their done-callbacks) before the turn moves on."""
+
+    def __call__(self, messages, *a, **k):
+        out = super().__call__(messages, *a, **k)
+        time.sleep(0.3)
+        return out
+
+
+def test_run_turn_progress_callback_error_swallowed(monkeypatch):
+    # A bridged emit that raises fails the run_coroutine_threadsafe
+    # future; _done's f.result() then raises and is swallowed, and the
+    # turn completes normally — progress is best-effort, never fatal.
+    stub = _SlowStub([("done", "horde", [], None, False)],
+                     progress_texts=["working…"], tokens=["tok"])
+    monkeypatch.setattr(models, "chat", stub)
+    seen, emit = _events()
+
+    async def flaky_emit(ev):
+        if ev.get("text") in ("working…", "tok"):
+            raise RuntimeError("sse gone")
+        seen.append(ev)
+
+    out = run(run_turn([{"role": "user", "content": "hi"}], flaky_emit))
+    assert out == "done"
+    assert {"type": "done", "model": "horde"} in seen
+    assert not [e for e in seen if e.get("text") in ("working…", "tok")]
+
+
+def test_run_turn_progress_bridge_failure_swallowed(monkeypatch):
+    # If run_coroutine_threadsafe itself raises, both _progress and
+    # _on_token swallow it and the turn still completes.
+    def boom(coro, loop):
+        coro.close()  # never started: close it so no warning is raised
+        raise RuntimeError("loop gone")
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", boom)
+    stub = _ChatStub([("done", "horde", [], None, False)],
+                     progress_texts=["working…"], tokens=["tok"])
+    monkeypatch.setattr(models, "chat", stub)
+    seen, emit = _events()
+    out = run(run_turn([{"role": "user", "content": "hi"}], emit))
+    assert out == "done"
+    assert {"type": "done", "model": "horde"} in seen

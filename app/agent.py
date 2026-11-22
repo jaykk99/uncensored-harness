@@ -77,7 +77,7 @@ def _parse_fenced_calls(text: str) -> tuple[str, list[dict]]:
         if obj.get("name"):
             calls.append({"id": f"call_{uuid.uuid4().hex[:8]}",
                           "name": obj["name"],
-                          "args": obj.get("arguments") or {}})
+                          "args": models._norm_tool_args(obj.get("arguments"))})
     clean = TOOL_CALL_FENCE_RE.sub("", text or "").strip()
     return clean, calls
 

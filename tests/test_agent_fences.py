@@ -50,3 +50,33 @@ def test_object_without_name_is_still_skipped():
         '```tool_call\n{"arguments": {"path": "."}}\n```')
     assert calls == []
     assert clean == ""
+
+
+def test_fenced_call_with_stringified_arguments_is_parsed():
+    # Sloppy models double-encode arguments as a JSON string holding
+    # a JSON object. The tool must receive the parsed object, not the
+    # raw string (which would crash the dispatcher on `**args`).
+    clean, calls = _parse_fenced_calls(
+        '```tool_call\n{"name": "file_list", '
+        '"arguments": "{\\"path\\": \\".\\"}"}\n```')
+    assert len(calls) == 1
+    assert calls[0]["args"] == {"path": "."}
+    assert clean == ""
+
+
+def test_fenced_call_with_non_object_arguments_becomes_empty_dict():
+    # A list, a bare string, or a number is valid JSON for the block
+    # but not an arguments object. The call is kept (it has a name)
+    # with empty args instead of crashing the turn on `**args`.
+    _, calls = _parse_fenced_calls(
+        '```tool_call\n{"name": "file_list", "arguments": ["path"]}\n```')
+    assert len(calls) == 1
+    assert calls[0]["args"] == {}
+    _, calls = _parse_fenced_calls(
+        '```tool_call\n{"name": "file_list", "arguments": "path"}\n```')
+    assert len(calls) == 1
+    assert calls[0]["args"] == {}
+    _, calls = _parse_fenced_calls(
+        '```tool_call\n{"name": "file_list", "arguments": 42}\n```')
+    assert len(calls) == 1
+    assert calls[0]["args"] == {}

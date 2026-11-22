@@ -716,15 +716,44 @@ class _Refusal(Exception):
     pass
 
 
+def _norm_tool_args(raw) -> dict:
+    """Normalize a tool call's arguments to a dict.
+
+    Providers disagree on the shape: most send a JSON string, some
+    already send a parsed object, and sloppy models send a JSON string
+    of a stringified object. Anything that is not an object after
+    parsing (a list, a bare string, a number, unparsable junk) becomes
+    {} instead of reaching the dispatcher, where `**args` would raise
+    TypeError and the tool would never run — or, for an already-parsed
+    object, where json.loads would raise and the valid args would be
+    silently dropped.
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        # Unwrap up to a few string layers: a double-encoded model
+        # sends a JSON string of a JSON string of the object. A
+        # legitimate arguments value is never a bare string, so
+        # unwrapping is safe; anything left that is not an object
+        # after the unwraps becomes {}.
+        parsed = raw
+        for _ in range(3):
+            if not isinstance(parsed, str):
+                break
+            try:
+                parsed = json.loads(parsed or "{}")
+            except Exception:
+                return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _parse_tool_calls(msg: dict) -> list[dict]:
     """Parse OpenAI-format tool_calls from a raw assistant message."""
     tool_calls = []
     for tc in msg.get("tool_calls") or []:
         fn = tc.get("function", {})
-        try:
-            args = json.loads(fn.get("arguments") or "{}")
-        except Exception:
-            args = {}
+        args = _norm_tool_args(fn.get("arguments"))
         tool_calls.append({"id": tc.get("id") or f"call_{len(tool_calls)}",
                            "name": fn.get("name", ""), "args": args})
     return tool_calls

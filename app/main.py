@@ -802,6 +802,26 @@ def index():
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
+async def _sse_pinger(queue: asyncio.Queue,
+                    stop_ping: asyncio.Event) -> None:
+    """Keepalive for SSE streams: some proxies (Railway included) kill
+    connections that go quiet. Sends a `: ping` comment every 15s until
+    stop_ping is set; clients ignore SSE comments. A stop that lands
+    during the sleep ends the loop without one last ping. Cancellation
+    (the turn ending) is swallowed: the pinger is best-effort, never a
+    reason for the stream to fail. Module-level so the stop-during-
+    sleep break is unit-testable without running a 15s turn.
+    """
+    try:
+        while not stop_ping.is_set():
+            await asyncio.sleep(15)
+            if stop_ping.is_set():
+                break
+            await queue.put(": ping\n\n")
+    except asyncio.CancelledError:
+        pass
+
+
 def _stream_turn(thread_id: str, history: list[dict], model: str = "",
                  web_search: bool = False,
                  instructions: str = "") -> StreamingResponse:
@@ -863,22 +883,8 @@ def _stream_turn(thread_id: str, history: list[dict], model: str = "",
 
         task = asyncio.create_task(run_agent())
 
-        # Keepalive: some proxies (Railway included) kill SSE streams that go
-        # quiet. Send a comment ping every 15s so the connection stays alive
-        # through long model waits. Clients ignore SSE comments.
         stop_ping = asyncio.Event()
-
-        async def pinger():
-            try:
-                while not stop_ping.is_set():
-                    await asyncio.sleep(15)
-                    if stop_ping.is_set():
-                        break
-                    await queue.put(": ping\n\n")
-            except asyncio.CancelledError:
-                pass
-
-        ping_task = asyncio.create_task(pinger())
+        ping_task = asyncio.create_task(_sse_pinger(queue, stop_ping))
         try:
             while True:
                 chunk = await queue.get()

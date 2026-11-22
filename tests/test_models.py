@@ -15,6 +15,7 @@ import pytest
 from app import models
 from app.models import (
     _norm,
+    _norm_tool_args,
     _parse_tool_calls,
     looks_like_refusal,
     self_test,
@@ -130,6 +131,51 @@ def test_parse_multiple_and_malformed_args():
 def test_parse_no_tool_calls():
     assert _parse_tool_calls({}) == []
     assert _parse_tool_calls({"content": "hi"}) == []
+
+
+def test_parse_tool_call_args_already_a_dict_are_kept():
+    # Some providers return arguments already parsed. json.loads on a
+    # dict raises TypeError, which used to silently drop valid args.
+    msg = {"tool_calls": [
+        {"id": "a", "function": {"name": "t1", "arguments": {"k": 1}}}]}
+    (call,) = _parse_tool_calls(msg)
+    assert call["args"] == {"k": 1}
+
+
+def test_parse_tool_call_args_non_object_become_empty_dict():
+    # A list, a bare string, or a number is valid JSON but not an
+    # arguments object. It must become {} instead of reaching the
+    # dispatcher, where `**args` would raise TypeError and the tool
+    # would never run.
+    msg = {"tool_calls": [
+        {"id": "a", "function": {"name": "t1", "arguments": "[1, 2]"}},
+        {"id": "b", "function": {"name": "t2", "arguments": '"just a string"'}},
+        {"id": "c", "function": {"name": "t3", "arguments": "42"}},
+        {"id": "d", "function": {"name": "t4", "arguments": 42}},
+        {"id": "e", "function": {"name": "t5", "arguments": None}},
+    ]}
+    calls = _parse_tool_calls(msg)
+    assert [c["args"] for c in calls] == [{}, {}, {}, {}, {}]
+
+
+def test_parse_tool_call_args_stringified_object_is_parsed():
+    # Sloppy models double-encode: arguments is a JSON string holding
+    # a JSON object. Parse one level and use the object inside.
+    msg = {"tool_calls": [
+        {"id": "a", "function": {"name": "t1",
+                                "arguments": json.dumps(json.dumps({"k": 1}))}}]}
+    (call,) = _parse_tool_calls(msg)
+    assert call["args"] == {"k": 1}
+
+
+def test_norm_tool_args_passthrough_and_garbage():
+    assert _norm_tool_args({"k": 1}) == {"k": 1}
+    assert _norm_tool_args('{"k": 1}') == {"k": 1}
+    assert _norm_tool_args("") == {}
+    assert _norm_tool_args("not-json{") == {}
+    assert _norm_tool_args("[1]") == {}
+    assert _norm_tool_args(None) == {}
+    assert _norm_tool_args(7) == {}
 
 
 # ---------------------------------------------------------------------------

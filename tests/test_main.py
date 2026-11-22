@@ -1741,6 +1741,85 @@ def test_stream_turn_keepalive_pings(monkeypatch, tmp_path):
     assert "slow answer" in r.text
 
 
+def test_sse_pinger_emits_ping_until_stopped(monkeypatch):
+    # Direct unit test of the extracted keepalive loop: one 15s sleep
+    # yields one ping, then a stop set from the test ends the loop.
+    import asyncio
+
+    from app.main import _sse_pinger
+    from tests.conftest import run
+
+    real_sleep = asyncio.sleep
+    calls = {"n": 0}
+
+    async def _tick(delay, *args, **kwargs):
+        calls["n"] += 1
+        await real_sleep(0.01)
+
+    monkeypatch.setattr(asyncio, "sleep", _tick)
+
+    async def _drive():
+        queue = asyncio.Queue()
+        stop = asyncio.Event()
+        task = asyncio.create_task(_sse_pinger(queue, stop))
+        got = await asyncio.wait_for(queue.get(), timeout=2)
+        assert got == ": ping\n\n"
+        stop.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert calls["n"] >= 1
+
+    run(_drive())
+
+
+def test_sse_pinger_breaks_when_stopped_during_sleep(monkeypatch):
+    # The stop-during-sleep break (main.py:876, the last uncovered
+    # line): if stop_ping is set while the pinger sleeps, the loop
+    # ends without emitting one last ping.
+    import asyncio
+
+    from app.main import _sse_pinger
+    from tests.conftest import run
+
+    async def _stop_mid_sleep(delay, *args, **kwargs):
+        _stop_mid_sleep.stop.set()
+
+    async def _drive():
+        queue = asyncio.Queue()
+        stop = asyncio.Event()
+        _stop_mid_sleep.stop = stop
+        await asyncio.wait_for(_sse_pinger(queue, stop), timeout=2)
+        assert queue.empty()
+
+    run(_drive())
+
+
+def test_sse_pinger_cancel_is_swallowed(monkeypatch):
+    # Cancelling the pinger (turn ending) must not raise: the
+    # keepalive is best-effort and never fails the stream.
+    import asyncio
+
+    from app.main import _sse_pinger
+    from tests.conftest import run
+
+    real_sleep = asyncio.sleep
+
+    async def _sleep_forever(delay, *args, **kwargs):
+        await real_sleep(30)
+
+    monkeypatch.setattr(asyncio, "sleep", _sleep_forever)
+
+    async def _drive():
+        queue = asyncio.Queue()
+        stop = asyncio.Event()
+        task = asyncio.create_task(_sse_pinger(queue, stop))
+        await real_sleep(0.05)
+        task.cancel()
+        await asyncio.wait_for(task, timeout=2)
+        assert task.done() and task.exception() is None
+
+    run(_drive())
+
+
 class _FakeProc:
     """Minimal stand-in for an asyncio subprocess (run_code only)."""
 

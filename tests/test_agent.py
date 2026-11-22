@@ -193,6 +193,30 @@ def test_run_turn_fenced_tool_call(monkeypatch):
     assert stub.calls[1][2]["tool_calls"][0]["function"]["name"] == "file_list"
 
 
+def test_run_turn_fenced_call_stringified_arguments(monkeypatch):
+    # A fenced call whose arguments are a JSON string of a JSON object
+    # must reach the tool parsed, not crash the dispatcher on `**args`.
+    text = ('```tool_call\n{"name": "file_list", '
+            '"arguments": "{\\"path\\": \\"somedir\\"}"}\n```')
+    stub = _ChatStub([
+        (text, "horde", [], None, False),
+        ("Files listed.", "horde", [], None, False),
+    ])
+    monkeypatch.setattr(models, "chat", stub)
+    from app import tools as T
+    seen_args = {}
+    tool = T.get_tool("file_list")
+
+    def _fake_list(path="."):
+        seen_args["path"] = path
+        return "a.txt"
+    monkeypatch.setitem(tool, "execute", _fake_list)
+    seen, emit = _events()
+    out = run(run_turn([{"role": "user", "content": "list files"}], emit))
+    assert out == "Files listed."
+    assert seen_args == {"path": "somedir"}
+
+
 def test_run_turn_unknown_tool(monkeypatch):
     calls = [{"id": "c1", "name": "nope_tool", "args": {}}]
     stub = _ChatStub([

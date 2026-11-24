@@ -4,7 +4,8 @@ Chain (never an RLHF-tuned refuser — no GPT, no Claude, no Gemini):
   1. RACE (primary) — Horde (45s cap: Stheno, Heretic, Rocinante workers,
      genuinely uncensored) runs in parallel against the fast keyless
      providers (Kilo Gateway, LLM7, Pollinations). Whichever answers first
-     wins; the losers are cancelled. This fixes Horde's unpredictable
+     wins; pending losers are cancelled and running ones finish in
+     the background. This fixes Horde's unpredictable
      queue times: a slow Horde queue no longer blocks the turn when a
      fast provider is ready.
   2. Omni chain (sequential fallback) — keyed providers with keys set
@@ -315,8 +316,12 @@ def pollinations_chat(messages: list[dict], max_tokens: int = 1200,
                 if progress and attempt < retries - 1:
                     progress(f"Pollinations rate-limited (HTTP {r.status_code}) — "
                              f"retrying…")
-                _sleep_backoff(attempt)
-                continue
+                if attempt < retries - 1:
+                    _sleep_backoff(attempt)
+                    continue
+                # Last attempt: no backoff sleep — there is nothing left
+                # to retry, so sleeping here only delays the error.
+                break
             r.raise_for_status()
             data = r.json()
             choices = data.get("choices") or []
@@ -359,7 +364,10 @@ def _horde_submit(api: str, headers: dict, submit_body: dict,
                                         f"{sub.text[:120]}")
                     logger.info("horde %s submit %s (attempt %d/3)",
                                 api, sub.status_code, attempt + 1)
-                    _sleep_backoff(attempt)
+                    # No backoff sleep after the final attempt — there is
+                    # nothing left to retry, so it only delays the error.
+                    if attempt < 2:
+                        _sleep_backoff(attempt)
                     continue
                 sub.raise_for_status()
                 job_id = sub.json().get("id")
@@ -372,7 +380,9 @@ def _horde_submit(api: str, headers: dict, submit_body: dict,
             last = e
             logger.info("horde %s submit network error (attempt %d/3): %s",
                         api, attempt + 1, e)
-            _sleep_backoff(attempt)
+            # No backoff sleep after the final attempt (see above).
+            if attempt < 2:
+                _sleep_backoff(attempt)
     raise RuntimeError(f"horde submit failed (last: {last})")
 
 
@@ -475,12 +485,20 @@ def _race_first_response(messages: list[dict], max_tokens: int,
     Horde is a volunteer worker network with unpredictable queue times.
     Instead of blocking on it, we run Horde, Kilo Gateway, LLM7, and
     Pollinations at the same time and take whichever returns a valid
-    non-refusal response first. The losers are cancelled.
+    non-refusal response first. Pending losers are cancelled;
+    running ones finish in the background.
 
     Returns (text, source, tool_calls, raw_msg). Raises RuntimeError if
     every leg fails. No token streaming during the race: if Pollinations
     streamed partial tokens and Horde won instead, the UI would show a
     confusing mix. The winner's full text is returned instead.
+
+    The winner returns at once: pending legs are cancelled and running
+    legs finish in the background (a thread already running cannot be
+    cancelled), so a slow Horde queue never blocks the turn once a fast
+    provider has answered. The background legs still record their leg
+    outcome via _record_leg, which opens its own sqlite connection per
+    call, so that is safe from the pool threads.
     """
     from . import providers as providers_mod  # lazy: providers imports from here
 
@@ -568,7 +586,15 @@ def _race_first_response(messages: list[dict], max_tokens: int,
     if progress:
         progress("Trying fast providers alongside Horde, taking the first answer…")
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    # No `with` block here on purpose: ThreadPoolExecutor.__exit__
+    # waits for every submitted future, so the old `with` made the
+    # "first answer wins" race wait for the slowest leg anyway — a
+    # slow Horde queue blocked the turn even after a fast provider
+    # had answered. The executor is shut down explicitly with
+    # wait=False instead: pending legs are cancelled, running legs
+    # finish in the background, and the winner returns at once.
+    ex = ThreadPoolExecutor(max_workers=4)
+    try:
         future_to_name = {ex.submit(fn): name for name, fn in legs}
         for future in as_completed(future_to_name):
             name = future_to_name[future]
@@ -580,13 +606,13 @@ def _race_first_response(messages: list[dict], max_tokens: int,
             except Exception as e:
                 logger.warning("race: %s failed: %s", name, e)
                 continue
-            # Winner: cancel the losers so they stop burning time.
-            for f, n in future_to_name.items():
-                if f is not future:
-                    f.cancel()
+            # Winner: stop waiting on the losers.
+            ex.shutdown(wait=False, cancel_futures=True)
             if progress:
                 progress(f"{result[1]} answered first, using it.")
             return result
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
     raise RuntimeError(
         "All providers failed: Horde, Kilo, LLM7, and Pollinations "
@@ -607,7 +633,8 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
     Phase 1 (race): Horde (45s cap, Stheno/Heretic/Rocinante) runs in
     parallel against the fast keyless providers (Kilo, LLM7, Pollinations).
     Whichever answers first with a valid non-refusal response wins; the
-    losers are cancelled. This fixes Horde's unpredictable queue times:
+    pending losers are cancelled and running ones finish in the
+    background. This fixes Horde's unpredictable queue times:
     the turn no longer blocks on a slow Horde queue when a fast provider
     is ready.
 
@@ -635,7 +662,8 @@ def chat(messages: list[dict], max_tokens: int = 1200, temperature: float = 0.7,
     # Phase 1: RACE. Horde's volunteer workers have unpredictable queue
     # times, so instead of blocking on Horde we run Horde (45s cap) against
     # the fast keyless providers (Kilo, LLM7, Pollinations) in parallel and
-    # take whichever answers first. The losers are cancelled.
+    # take whichever answers first. Pending losers are cancelled;
+    # running ones finish in the background.
     try:
         text, source, tool_calls, raw_msg = _race_first_response(
             messages, max_tokens, temperature, tools, progress, preferred_model)

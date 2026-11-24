@@ -352,6 +352,12 @@ def test_omni_leg_refusal_still_refusal_not_error(tmp_path, monkeypatch):
 
 import time as _time
 
+# Real sleep/backoff, saved before the _no_sleeps fixture below replaces
+# them: the timing-regression tests restore these so they measure wall
+# time instead of the fixture's no-ops.
+_REAL_SLEEP = _time.sleep
+_REAL_BACKOFF = models._sleep_backoff
+
 import httpx
 
 
@@ -435,6 +441,23 @@ def test_pollinations_chat_keeps_failing(monkeypatch):
                         lambda req: httpx.Response(429, text="slow"))
     with pytest.raises(RuntimeError, match="kept failing after 3 attempts"):
         models.pollinations_chat([{"role": "user", "content": "hi"}], retries=3)
+
+
+def test_pollinations_no_backoff_after_final_attempt(monkeypatch):
+    # Regression: the retryable-status branch slept after EVERY attempt,
+    # including the last one — a permanent 429 with retries=2 burned
+    # ~6.5s of pure sleep before raising. Only the sleep before a retry
+    # is useful; the last failure must raise at once. Real sleeps are
+    # restored here (the _no_sleeps fixture no-ops them elsewhere).
+    monkeypatch.setattr(_time, "sleep", _REAL_SLEEP)
+    monkeypatch.setattr(models, "_sleep_backoff", _REAL_BACKOFF)
+    _mock_models_client(monkeypatch,
+                        lambda req: httpx.Response(429, text="slow"))
+    start = _time.time()
+    with pytest.raises(RuntimeError, match="kept failing after 2 attempts"):
+        models.pollinations_chat([{"role": "user", "content": "hi"}], retries=2)
+    elapsed = _time.time() - start
+    assert elapsed < 5.0, f"final-attempt backoff slept: {elapsed:.2f}s"
 
 
 def test_pollinations_chat_http_status_error(monkeypatch):
@@ -588,6 +611,22 @@ def test_horde_submit_network_error_exhausts(monkeypatch):
     _mock_models_client(monkeypatch, handler)
     with pytest.raises(RuntimeError, match="horde submit failed"):
         models._horde_submit("https://stablehorde.net/api/v2", {}, {})
+
+
+def test_horde_submit_no_backoff_after_final_attempt(monkeypatch):
+    # Same final-attempt waste as pollinations: a permanent 429 burned
+    # ~15s of backoff sleep across 3 attempts before raising. After the
+    # fix only the two sleeps before a retry remain (~6-8s). Real sleeps
+    # are restored here (the _no_sleeps fixture no-ops them elsewhere).
+    monkeypatch.setattr(_time, "sleep", _REAL_SLEEP)
+    monkeypatch.setattr(models, "_sleep_backoff", _REAL_BACKOFF)
+    _mock_models_client(monkeypatch,
+                        lambda req: httpx.Response(429, text="slow"))
+    start = _time.time()
+    with pytest.raises(RuntimeError, match="horde submit failed"):
+        models._horde_submit("https://stablehorde.net/api/v2", {}, {})
+    elapsed = _time.time() - start
+    assert elapsed < 11.0, f"final-attempt backoff slept: {elapsed:.2f}s"
 
 
 def _horde_status_handler(done_text="horde says hi", faulted=False,
@@ -764,6 +803,24 @@ def test_race_progress_reported(monkeypatch):
     models._race_first_response(
         [{"role": "user", "content": "hi"}], 100, 0.7, None, seen.append, "")
     assert seen and "Trying fast providers" in seen[0]
+
+
+def test_race_returns_when_first_leg_answers(monkeypatch):
+    # Regression: the race used to wait for EVERY leg (ThreadPoolExecutor's
+    # `with` block joins all futures), so a slow Horde queue blocked the
+    # turn even after a fast provider had answered. Kilo answers at once,
+    # Horde takes 5s: the call must return in well under 5s.
+    def slow_horde(*a, **k):
+        _REAL_SLEEP(5)
+        return "horde slow answer"
+    _race(monkeypatch, horde=slow_horde, kilo="kilo fast answer")
+    start = _time.time()
+    text, source, calls, raw = models._race_first_response(
+        [{"role": "user", "content": "hi"}], 100, 0.7, None, None, "")
+    elapsed = _time.time() - start
+    assert text == "kilo fast answer"
+    assert source.startswith("kilo/")
+    assert elapsed < 3.0, f"race waited for the slow leg: {elapsed:.2f}s"
 
 
 def test_chat_race_win_returns_immediately(monkeypatch):
